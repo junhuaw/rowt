@@ -69,6 +69,7 @@ fn run() -> Result<String, String> {
         captive_check_disabled: b(o, "captive_check_disabled"),
         gateway_ok: b(o, "gateway_ok"),
         portal_url: opt(o, "portal_url"),
+        portal_host: opt(o, "portal_host"),
         active_service: opt(o, "active_service"),
         proxy_any_on: b(o, "proxy_any_on"),
         host_running: b(o, "host_running"),

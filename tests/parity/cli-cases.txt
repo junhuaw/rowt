@@ -140,7 +140,10 @@ PARITY_SCENARIO=wildcard-lane config export --to shadowrocket --routes-only -
 # `watch.restart`, and a `captive=` key rewritten on every tick.
 PARITY_NOTRACE=1 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 PARITY_NOTRACE=1 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
-PARITY_NOTRACE=1 PARITY_SCENARIO=captive-dhcp-dns watch tick
+# The slowest tick in the matrix: a DNS pin plus a full probe on BOTH sides,
+# 16-20s together against the 25s default — it timed out once under load
+# while the machine was busy, on a run where nothing was wrong.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=captive-dhcp-dns watch tick
 PARITY_NOTRACE=1 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
 PARITY_NOTRACE=1 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 # …and the one tick that needs NO exemption, because a hands-off tick reads

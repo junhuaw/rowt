@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.15"
+ROWT_VERSION="3.5.16"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3064,6 +3064,31 @@ _captive_resolve_at() { # $1=nameserver $2=host
 # only watch.log, so this file sits outside every compared surface.
 _captive_log() { mkdir -p "$LOGDIR" 2>/dev/null || true; printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOGDIR/captive.log"; }
 
+# The host of a URL — no port, no query, no fragment.
+_url_host() { case "${1:-}" in *://*) ;; *) return 0 ;; esac
+  local h="${1#*://}"; h="${h%%/*}"; h="${h%%\?*}"; h="${h%%#*}"; printf '%s' "${h%%:*}"; }
+# A URL without its query string. A portal's query carries the client's MAC and
+# IP; the log keeps the address, not the identifiers. `open` still gets it whole.
+_url_noquery() { printf '%s' "${1%%\?*}"; }
+
+# The portal's OWN address, for a page that answers 200 inline instead of
+# redirecting. curl reports no redirect_url for one, so the only address the
+# probe otherwise learns is its own — which is what the airline-lounge episode
+# of 2026-09-27 logged and opened, leaving nothing to put in the hotspot lane
+# afterwards (it had to be dug out of the browser's history).
+#
+# The first http(s) URL in the body that is not the probe host itself: a meta
+# refresh, a JS redirect, or a plain link. ADVISORY ONLY — what gets opened is
+# deliberately unchanged, because a body URL is as likely to be a stylesheet as
+# the login page, while re-opening the probe URL is what the portal intercepts
+# and is already proven in the field.
+_captive_body_url() { # $1=body $2=probe host
+  printf '%s' "$1" | tr -d '\r' \
+    | grep -oE 'https?://[A-Za-z0-9._~%-]+(:[0-9]+)?(/[^"'"'"'<>[:space:]]*)?' 2>/dev/null \
+    | awk -F/ -v skip="${2:-}" '{ h=$3; sub(/:.*/,"",h); if (h != "" && h != skip) { print; exit } }' \
+    || true
+}
+
 # curl's exit status is the discriminator worth keeping; name the few that
 # actually distinguish one dead network from another.
 _curl_why() {
@@ -3095,11 +3120,22 @@ _captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty $3=labe
     30[0-9]|511) verdict=captive ;;
     *) verdict=unknown ;;
   esac
+  # Name the portal itself, not just our probe: its host from the redirect when
+  # there is one, else out of the body. This is what `hotspot add` wants, and
+  # what nothing recorded before.
+  local phost portal=""
+  phost="$(_url_host "$url")"
+  if [ "$verdict" = captive ]; then
+    portal="$(_url_host "${redir:-}")"
+    [ "$portal" = "$phost" ] && portal=""
+    [ -n "$portal" ] || portal="$(_url_host "$(_captive_body_url "$body" "$phost")")"
+  fi
   # A clear verdict needs no explaining; everything else is what a later reader
   # is trying to account for.
-  [ "$verdict" = clear ] || _captive_log "$verdict   $label: HTTP $code url=$url${rsv:+ resolve=$rsv}"
+  [ "$verdict" = clear ] || _captive_log "$verdict   $label: HTTP $code url=$url${rsv:+ resolve=$rsv}${portal:+ portal=$portal}"
   echo "$verdict"
-  [ "$verdict" = captive ] && printf '%s\n' "${redir:-$url}"
+  # Line 2 is the page to open, line 3 the portal's host (may be empty).
+  [ "$verdict" = captive ] && printf '%s\n%s\n' "${redir:-$url}" "$portal"
   return 0
 }
 # $1 = the physical interface (may be empty: offline), $2 = 1 when the network
@@ -3146,7 +3182,8 @@ _captive_probe_ipfallback() { # $1=host, for a plausible Host header
   echo captive
   # Only a real redirect target is worth opening: the fallback URL itself is an
   # address nobody can reach, so handing it to the browser would be a blank tab.
-  [ -n "$redir" ] && printf '%s\n' "$redir"
+  # Line 3 is the portal's host, as in `_captive_probe_once`.
+  [ -n "$redir" ] && printf '%s\n%s\n' "$redir" "$(_url_host "$redir")"
   return 0
 }
 _captive_pin() { # $1=iface $2=host $3=port -> host:port:ip for --resolve, or nothing
@@ -3196,12 +3233,20 @@ _captive_state() {
 # audit) alongside the drop's own lines and BEFORE the drop, acted on AFTER it
 # — the browser must not race a proxy that is still on. `open` from the
 # LaunchAgent lands in the user's session (it is an Aqua agent).
-_captive_portal_announce() { # $1=url
+_captive_portal_announce() { # $1=url $2=portal host (may be empty)
   case "$1" in http://*|https://*) ;; *) return 0 ;; esac
-  _watch_log "captive portal: opening its login page in the browser — $1"
-  _wact "log captive portal: opening its login page in the browser — $1"
-  _audit "watchdog: captive portal — opened $1 in the browser"
-  _wact "audit watchdog: captive portal — opened $1 in the browser"
+  local u; u="$(_url_noquery "$1")"
+  _watch_log "captive portal: opening its login page in the browser — $u"
+  _wact "log captive portal: opening its login page in the browser — $u"
+  _audit "watchdog: captive portal — opened $u in the browser"
+  _wact "audit watchdog: captive portal — opened $u in the browser"
+  # Name the venue's own host and the command that makes the next visit load on
+  # the first try. Without this the host is nowhere on disk, and recovering it
+  # meant reading the browser's history for the right three minutes.
+  if [ -n "${2:-}" ]; then
+    _watch_log "captive portal host: $2 — '$PROG hotspot add $2' makes its page load with the proxy on"
+    _wact "log captive portal host: $2 — '$PROG hotspot add $2' makes its page load with the proxy on"
+  fi
 }
 _captive_open_portal() { # $1=url
   case "$1" in http://*|https://*) ;; *) return 0 ;; esac
@@ -4599,13 +4644,14 @@ _wobs() {
   _SH_OBS="$(mktemp)"
   jq -n \
     --arg pi "$3" --arg cap "$1" --arg svc "$svc" --arg intent "$2" --arg ifc "$ifc" --arg purl "${4:-}" \
+    --arg phost "${5:-}" \
     --arg mode "$(sget mode 2>/dev/null || true)" \
     --argjson any "$( { [ -n "$svc" ] && _proxy_any_on "$svc"; } && echo true || echo false)" \
     --argjson running "$(host_running && echo true || echo false)" \
     --argjson boot "$([ "$(sget boot)" = "$(_boot_id)" ] && echo true || echo false)" \
     --argjson pointing "$( { [ -n "$svc" ] && _proxy_pointing_ok "$svc"; } && echo true || echo false)" \
     --argjson flag "$([ "$_SH_CAPTIVE0" = 1 ] && echo true || echo false)" \
-    '{obs:{proxy_intent:$pi, captive:$cap, portal_url:$purl, active_service:$svc, proxy_any_on:$any,
+    '{obs:{proxy_intent:$pi, captive:$cap, portal_url:$purl, portal_host:$phost, active_service:$svc, proxy_any_on:$any,
            host_running:$running, intent:$intent, boot_matches:$boot, iface:$ifc,
            proxy_pointing_ok:$pointing, mode:(if $mode == "" then "host" else $mode end)},
       state:{captive_flag:$flag}}' > "$_SH_OBS" 2>/dev/null
@@ -5240,7 +5286,7 @@ cmd_watch() {
       # netcheck wrote on the last tick that got that far) are read here, before
       # the probe: the resolver comes from the interface, and the re-probe burst
       # is only for a network that just changed.
-      local capout cap capurl="" cifc cmoved=0
+      local capout cap capurl="" caphost="" caprest cifc cmoved=0
       cifc="$(detect_iface 2>/dev/null || true)"
       [ -n "$cifc" ] && [ "$(net_id "$cifc")" != "$(cat "$WATCH_NET" 2>/dev/null || true)" ] && cmoved=1
       capout="$(_captive_state "$cifc" "$cmoved")"
@@ -5251,9 +5297,15 @@ cmd_watch() {
       # busy.
       touch "$CFG/watch.lock" 2>/dev/null || true
       cap="${capout%%$'\n'*}"
-      case "$capout" in *$'\n'*) capurl="${capout#*$'\n'}" ;; esac
+      # Line 2 is the page to open, line 3 the portal's host — split both, or a
+      # three-line answer would hand the browser "url<newline>host".
+      case "$capout" in *$'\n'*)
+        caprest="${capout#*$'\n'}"
+        capurl="${caprest%%$'\n'*}"
+        case "$caprest" in *$'\n'*) caphost="${caprest#*$'\n'}"; caphost="${caphost%%$'\n'*}" ;; esac
+      ;; esac
       _SH_CAP="$cap"; _SH_INTENT="$intent"; _SH_PROXY_INTENT="$proxy_intent"
-      _wobs "$cap" "$intent" "$proxy_intent" "$capurl"
+      _wobs "$cap" "$intent" "$proxy_intent" "$capurl" "$caphost"
       # Journal what this network/VPN advertises whenever it CHANGES (no-op in
       # steady state) — includes the captive state, so portal episodes and their
       # advertised domains land in the same line (log/discovery.log).
@@ -5268,14 +5320,14 @@ cmd_watch() {
             _wact "log captive portal detected — dropping system proxy on '$csvc' so the login page can load (auto-restores after login)"
             _audit "watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
             _wact "audit watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
-            _captive_portal_announce "$capurl"
+            _captive_portal_announce "$capurl" "$caphost"
             _wact "captive-proxy-off $csvc"
             _captive_proxy_off "$csvc" \
               || _watch_log "captive: could not drop the proxy (sudoers missing?) — log in after a manual '$PROG proxy off'"
           else
             _watch_log "captive portal detected — proxy already off; waiting for login"
             _wact "log captive portal detected — proxy already off; waiting for login"
-            _captive_portal_announce "$capurl"
+            _captive_portal_announce "$capurl" "$caphost"
           fi
           _captive_open_portal "$capurl"
         fi

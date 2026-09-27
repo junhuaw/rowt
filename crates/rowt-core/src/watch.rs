@@ -62,6 +62,11 @@ pub struct Observation {
     /// portal serving its page under that URL answers the browser the same
     /// way). None otherwise.
     pub portal_url: Option<String>,
+    /// On `captive`: the portal's OWN host — from the redirect target, or out
+    /// of the body of a page that answered 200 inline. It is what
+    /// `hotspot add` takes, and nothing recorded it before (see
+    /// `_captive_body_url`). Empty or None when the probe could not name one.
+    pub portal_host: Option<String>,
     pub active_service: Option<String>,
     /// `_proxy_any_on` — is any protocol currently proxied?
     pub proxy_any_on: bool,
@@ -264,10 +269,20 @@ pub fn guard(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                 // proxy that is still on.
                 let page = obs.portal_url.as_deref()
                     .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
-                fn announce(a: &mut Vec<Action>, page: Option<&str>) {
+                // The log keeps the address, not the identifiers: a portal's
+                // query string carries the client's MAC and IP. `open` still
+                // gets the URL whole.
+                let host = obs.portal_host.as_deref().filter(|h| !h.is_empty());
+                fn announce(a: &mut Vec<Action>, page: Option<&str>, host: Option<&str>) {
                     if let Some(u) = page {
+                        let u = u.split('?').next().unwrap_or(u);
                         a.push(Action::Log(format!("captive portal: opening its login page in the browser — {u}")));
                         a.push(Action::Audit(format!("watchdog: captive portal — opened {u} in the browser")));
+                        if let Some(h) = host {
+                            a.push(Action::Log(format!(
+                                "captive portal host: {h} — 'rowt hotspot add {h}' makes its page load with the proxy on"
+                            )));
+                        }
                     }
                 }
                 match (&obs.active_service, obs.proxy_any_on) {
@@ -278,14 +293,14 @@ pub fn guard(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                         a.push(Action::Audit(format!(
                             "watchdog: captive portal — system proxy off on '{svc}' (intent stays on; auto-restore on clear)"
                         )));
-                        announce(&mut a, page);
+                        announce(&mut a, page, host);
                         a.push(Action::CaptiveProxyOff(svc.clone()));
                     }
                     _ => {
                         a.push(Action::Log(
                             "captive portal detected — proxy already off; waiting for login".into(),
                         ));
-                        announce(&mut a, page);
+                        announce(&mut a, page, host);
                     }
                 }
                 if let Some(u) = page {
@@ -471,6 +486,7 @@ mod tests {
             // interesting cases set it false deliberately.
             gateway_ok: true,
             portal_url: None,
+            portal_host: None,
             active_service: Some("Wi-Fi".into()),
             proxy_any_on: true,
             host_running: true,

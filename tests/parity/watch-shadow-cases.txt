@@ -15,6 +15,9 @@
 # diverges. That is what makes the snapshot discipline testable here rather than
 # only on a real machine — see selftest step 10b.
 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick | captive portal detected — dropping system proxy
+# A 200-inline portal names itself only in its BODY; both sides must pull the
+# host out of it and print the 'hotspot add' line (task #46).
+PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick | captive portal host: portal.fakelounge.example
 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | captive portal cleared
 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/redirect watch tick | opening its login page in the browser — http://portal.fake/login
 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick

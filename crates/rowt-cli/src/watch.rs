@@ -260,11 +260,11 @@ fn uid() -> String {
 /// tick is the budget, and `unknown` there is the hands-off answer it always
 /// was. Silent on purpose — a log line here would be an action the planner
 /// never took.
-fn captive_state(log: &Path, iface: Option<&str>, moved: bool) -> (CaptiveState, Option<String>) {
+fn captive_state(log: &Path, iface: Option<&str>, moved: bool) -> (CaptiveState, Option<String>, Option<String>) {
     if env_or("ROWT_CAPTIVE_CHECK", "1") != "1" {
         // Deliberately unlogged: this is a configuration fact, not a probe
         // outcome, and a line per tick would bury the ones that matter.
-        return (CaptiveState::Unknown, None);
+        return (CaptiveState::Unknown, None, None);
     }
     let url = env_or("ROWT_CAPTIVE_URL", "http://captive.apple.com/hotspot-detect.html");
     let t = env_or("ROWT_CAPTIVE_TIMEOUT", "6");
@@ -332,27 +332,28 @@ fn probe_args<'a>(url: &'a str, timeout: &'a str, resolve: Option<&'a str>) -> V
 }
 
 /// One probe. `resolve` is curl's `host:port:ip`, placed right before `-w`.
-fn probe_once(log: &Path, label: &str, url: &str, timeout: &str, resolve: Option<&str>) -> (CaptiveState, Option<String>) {
+fn probe_once(log: &Path, label: &str, url: &str, timeout: &str, resolve: Option<&str>) -> (CaptiveState, Option<String>, Option<String>) {
     let args = probe_args(url, timeout, resolve);
     let rsv = resolve.map(|r| format!(" resolve={r}")).unwrap_or_default();
     let o = Command::new("curl").args(&args).stderr(Stdio::null()).output();
     let Ok(o) = o else {
         captive_log(log, &format!("unknown   {label}: could not run curl url={url}{rsv}"));
-        return (CaptiveState::Unknown, None);
+        return (CaptiveState::Unknown, None, None);
     };
     if !o.status.success() {
         // The status is the whole point: 6 is DNS, 7 a black hole, 28 a
         // timeout, and the shell used to throw all three away as `unknown`.
         let rc = o.status.code().unwrap_or(-1);
         captive_log(log, &format!("unknown   {label}: {} (rc={rc}) url={url}{rsv}", curl_why(rc)));
-        return (CaptiveState::Unknown, None);
+        return (CaptiveState::Unknown, None, None);
     }
     let v = probe_verdict(&String::from_utf8_lossy(&o.stdout), url);
     // A clear verdict needs no explaining; everything else is what a later
     // reader is trying to account for.
     if v.0 != CaptiveState::Clear {
         let (code, _) = split_probe(&String::from_utf8_lossy(&o.stdout));
-        captive_log(log, &format!("{}   {label}: HTTP {code} url={url}{rsv}", v.0.as_str()));
+        let portal = v.2.as_ref().map(|h| format!(" portal={h}")).unwrap_or_default();
+        captive_log(log, &format!("{}   {label}: HTTP {code} url={url}{rsv}{portal}", v.0.as_str()));
     }
     v
 }
@@ -387,7 +388,7 @@ fn probe_host_port(url: &str) -> Option<(String, String)> {
 /// it safe to act on. And only a REDIRECT counts: without DNS a 200 from an
 /// unidentified box is evidence of nothing, and acting on it would drop the
 /// system proxy on a network that was merely slow.
-fn probe_ip_fallback(log: &Path, host: &str, timeout: &str) -> Option<(CaptiveState, Option<String>)> {
+fn probe_ip_fallback(log: &Path, host: &str, timeout: &str) -> Option<(CaptiveState, Option<String>, Option<String>)> {
     let url = env_or("ROWT_CAPTIVE_FALLBACK", "http://192.0.2.1/");
     let hostarg = format!("Host: {host}");
     let mut args: Vec<&str> = vec!["-s", "--noproxy", "*", "--max-time", timeout];
@@ -411,7 +412,9 @@ fn probe_ip_fallback(log: &Path, host: &str, timeout: &str) -> Option<(CaptiveSt
     }
     // Only a real redirect target is worth opening: the fallback URL itself is
     // an address nobody can reach, so the browser would get a blank tab.
-    Some((CaptiveState::Captive, (!redir.is_empty()).then(|| redir)))
+    // Line 3 is the portal host, as in `probe_once`.
+    let host = url_host(&redir);
+    Some((CaptiveState::Captive, (!redir.is_empty()).then(|| redir), host))
 }
 
 /// `ROWT_CAPTIVE_RETRY`: seconds, comma- (or space-) separated. A token that
@@ -455,7 +458,7 @@ fn split_probe(body: &str) -> (String, String) {
     (code.trim().to_string(), redir)
 }
 
-fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>) {
+fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>, Option<String>) {
     // `$(…)` strips trailing newlines, then `${out##*$'\n'}` / `${out%$'\n'*}`
     // peel the LAST line twice — the redirect, then the code — because the
     // body itself contains plenty of newlines. The redirect line carries a
@@ -474,8 +477,53 @@ fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>) {
         _ => CaptiveState::Unknown,
     };
     let page = (verdict == CaptiveState::Captive)
-        .then(|| if redir.is_empty() { url.to_string() } else { redir });
-    (verdict, page)
+        .then(|| if redir.is_empty() { url.to_string() } else { redir.clone() });
+    // The portal's OWN host, which is what `hotspot add` takes: from the
+    // redirect when there was one, else out of the body of a page that
+    // answered 200 inline. `_captive_body_url` in the shell.
+    let probe_h = url_host(url);
+    let host = (verdict == CaptiveState::Captive)
+        .then(|| {
+            url_host(&redir)
+                .filter(|h| Some(h.as_str()) != probe_h.as_deref())
+                .or_else(|| body_url(payload, probe_h.as_deref()).and_then(|u| url_host(&u)))
+        })
+        .flatten();
+    (verdict, page, host)
+}
+
+/// The host of a URL — no port, no query, no fragment. `_url_host`.
+fn url_host(url: &str) -> Option<String> {
+    // A scheme is required: without one there is no authority to read, and
+    // `javascript:alert(1)` would otherwise yield a "host" of `javascript`.
+    let rest = url.split_once("://").map(|(_, r)| r)?;
+    let h = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let h = h.split(':').next().unwrap_or("");
+    (!h.is_empty()).then(|| h.to_string())
+}
+
+/// The first http(s) URL in a body that is not the probe host itself — a meta
+/// refresh, a JS redirect or a plain link. `_captive_body_url`; advisory only,
+/// it never changes which page is opened.
+fn body_url(body: &str, skip: Option<&str>) -> Option<String> {
+    let body = body.replace('\r', "");
+    let mut rest = body.as_str();
+    while let Some(i) = rest.find("http") {
+        rest = &rest[i..];
+        let scheme = if rest.starts_with("https://") { 8 } else if rest.starts_with("http://") { 7 } else { rest = &rest[4..]; continue };
+        let end = rest[scheme..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+            .map(|n| scheme + n)
+            .unwrap_or(rest.len());
+        let candidate = &rest[..end];
+        if let Some(h) = url_host(candidate) {
+            if Some(h.as_str()) != skip {
+                return Some(candidate.to_string());
+            }
+        }
+        rest = &rest[end.max(scheme)..];
+    }
+    None
 }
 
 /// `net_id` — a signature for "which network am I on", so a home→hotspot move
@@ -491,7 +539,7 @@ fn net_id(iface: &str) -> String {
     format!("{ssid} {addr}/{router}").trim().to_string()
 }
 
-fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, health_ok: bool) -> Observation {
+fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_host: Option<String>, health_ok: bool) -> Observation {
     let p = Mac;
     let svc = p.active_service();
     let iface = p.detect_iface();
@@ -515,6 +563,7 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, health_
             && cap != Some(CaptiveState::Clear)
             && iface.as_deref().and_then(|i| p.gateway(i)).map(|gw| p.gateway_alive(&gw)).unwrap_or(false),
         portal_url: portal,
+        portal_host,
         proxy_any_on: svc.as_ref().map(|s| p.proxy_any_on(s)).unwrap_or(false),
         proxy_pointing_ok: svc.as_ref().map(|s| p.proxy_pointing_ok(s, ctx.port)).unwrap_or(false),
         proxy_bypass_ok: svc.as_ref().map(|s| rowt_platform::bypass_ok(s, &crate::hotspot_bypass(&ctx.cfg))).unwrap_or(false),
@@ -977,7 +1026,7 @@ fn tick(ctx: &Ctx) {
     // is only for a network that just changed.
     let iface = Mac.detect_iface();
     let moved = iface.as_deref().is_some_and(|i| st.last_net_id.as_deref() != Some(net_id(i).as_str()));
-    let (cap, portal) = captive_state(&ctx.logdir(), iface.as_deref(), moved);
+    let (cap, portal, portal_host) = captive_state(&ctx.logdir(), iface.as_deref(), moved);
     // The re-probe burst is the one place a healthy tick spends tens of
     // seconds (≈33 s worst case). Restart the stale-lock clock after it, so
     // "older than a minute" keeps measuring the tick the reclaim comment
@@ -991,7 +1040,7 @@ fn tick(ctx: &Ctx) {
     // `Action::Journal` because that is what the shadow comparison matches
     // against; `perform` skips it below rather than running it twice.
     journal(ctx, cap);
-    let obs = observe(ctx, Some(cap), portal.clone(), true);
+    let obs = observe(ctx, Some(cap), portal.clone(), portal_host.clone(), true);
     let g = guard(&obs, &st, &cfg);
     perform_planned(ctx, &g.actions);
     st = g.state;
@@ -1020,7 +1069,7 @@ fn tick(ctx: &Ctx) {
         return;
     }
     let hb = ctx.mode() == "local" || health_ok(ctx);
-    let obs2 = observe(ctx, Some(cap), portal, hb);
+    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb);
     let n = netcheck(&obs2, &st, &cfg);
     perform_planned(ctx, &n.actions);
     save_state(ctx, &mut disk, &n.state);
@@ -1140,6 +1189,44 @@ mod tests {
     }
 
     #[test]
+    /// A portal that answers 200 INLINE names itself only in its body. Without
+    /// this the sole address ever learned is the probe's own, which is what the
+    /// 2026-09-27 lounge episode logged and opened (task #46).
+    #[test]
+    fn a_200_inline_portal_is_named_from_its_body() {
+        let probe = "http://captive.apple.com/hotspot-detect.html";
+        let body = "<META http-equiv=\"refresh\" content=\"0;url=http://portal.lounge.example/login?mac=aa-bb\">\n200\nredirect=";
+        let (v, page, host) = probe_verdict(body, probe);
+        assert_eq!(v, CaptiveState::Captive);
+        // What gets OPENED is unchanged: the probe URL, which the portal intercepts.
+        assert_eq!(page.as_deref(), Some(probe));
+        assert_eq!(host.as_deref(), Some("portal.lounge.example"));
+
+        // A redirect names itself directly, and its own host wins.
+        let (_, page, host) = probe_verdict("\n302\nredirect=http://portal.fake/login?ip=1.2.3.4", probe);
+        assert_eq!(page.as_deref(), Some("http://portal.fake/login?ip=1.2.3.4"));
+        assert_eq!(host.as_deref(), Some("portal.fake"));
+
+        // A body naming only the probe host teaches nothing, so: no host.
+        let (_, _, host) = probe_verdict("<a href=\"http://captive.apple.com/x\">\n200\nredirect=", probe);
+        assert_eq!(host, None);
+
+        // Apple's own page is still clear, and a clear verdict names nothing.
+        let (v, page, host) = probe_verdict("<HTML>Success</HTML>\n200\nredirect=", probe);
+        assert_eq!((v, page, host), (CaptiveState::Clear, None, None));
+    }
+
+    #[test]
+    fn a_url_host_is_the_authority_without_port_query_or_fragment() {
+        assert_eq!(url_host("http://a.example:8080/p?q=1#f").as_deref(), Some("a.example"));
+        assert_eq!(url_host("https://b.example").as_deref(), Some("b.example"));
+        assert_eq!(url_host("javascript:alert(1)"), None);
+        assert_eq!(url_host(""), None);
+        // Only http(s) URLs are candidates out of a body.
+        assert_eq!(body_url("see javascript:void(0) and data:text/html,x", None), None);
+        assert_eq!(body_url("x http://h.example/a\" y", None).as_deref(), Some("http://h.example/a"));
+    }
+
     fn the_dns_free_fallback_acts_only_on_a_redirect() {
         let v = |body: &str| {
             let (code, redir) = split_probe(body);

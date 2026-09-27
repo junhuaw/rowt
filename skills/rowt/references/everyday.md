@@ -31,8 +31,9 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   to the **hotspot** lane: `rowt hotspot add unitedwifi.com`. That puts it on macOS's
   proxy bypass list (`x.com` and `*.x.com`), so the page loads on the first try with
   the proxy on. It's not a routing lane: nothing is rendered, and an edit only
-  refreshes the bypass list. If a portal page never loads, ask for its hostname (the
-  blank tab's address bar, or `watch.log`) and add it.
+  refreshes the bypass list. If a portal page never loads, `watch.log` names the
+  venue's host after an episode (`captive portal host: …`) along with the exact
+  `hotspot add` command; failing that, ask for the blank tab's address bar.
 
 ## Servers
 
