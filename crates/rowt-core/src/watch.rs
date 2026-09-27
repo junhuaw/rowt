@@ -84,6 +84,14 @@ pub struct Observation {
     pub mode: String,
     /// `_watch_probe` — is the escape tunnel answering? Only read in netcheck.
     pub health_ok: bool,
+    /// The quick probe failed but a far more patient one answered: the tunnel
+    /// is SLOW, not wedged. A link whose round trip sits on
+    /// `ROWT_HEALTH_TIMEOUT` fails every probe by a hair, and three of those
+    /// used to restart a router carrying traffic the whole time (measured
+    /// 2026-09-27 on in-flight satellite: 0/20 at the 8s default, 20/20 at 25s,
+    /// every RTT 7.6-8.8s). Only ever set when the quick probe failed, so a
+    /// healthy tick pays nothing for it.
+    pub health_slow: bool,
     pub now: i64,
 }
 
@@ -107,11 +115,14 @@ pub struct Config {
     pub port: u16,
     pub health_fails: u32,
     pub health_cooldown: i64,
+    /// `ROWT_HEALTH_TIMEOUT`, seconds — named in the slow-probe message so the
+    /// reader is told which knob to turn.
+    pub health_timeout: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { port: 7890, health_fails: 3, health_cooldown: 600 }
+        Config { port: 7890, health_fails: 3, health_cooldown: 600, health_timeout: 8 }
     }
 }
 
@@ -182,6 +193,28 @@ const NET_CHANGE_WINDOW: i64 = 900;
 /// explanation than a wedged tunnel?
 fn moved_recently(obs: &Observation, st: &State) -> bool {
     st.last_net_change != 0 && obs.now - st.last_net_change < NET_CHANGE_WINDOW
+}
+
+/// The shape of a garden that WHITELISTS the captive probe host.
+///
+/// Many in-flight and lounge networks allow `captive.apple.com` through on
+/// purpose, so the operating system's own captive popup stays quiet. rowt's
+/// probe then fetches the genuine Success page and reports `clear` while every
+/// real connection is still waiting for a login. Seen 2026-09-27 on a flight:
+/// joined at 13:11:56, verdict `clear` at 13:12:44, and the escape probe failing
+/// throughout — the user had to drop the proxy and log in by hand.
+///
+/// The tell is the combination: we only just joined, the captive probe says the
+/// network is fine, and the tunnel cannot reach anything. `gateway_ok` is
+/// deliberately NOT part of it — it is only measured when the verdict is not
+/// clear (see `observe`) — and it would add nothing here, because a `clear`
+/// verdict already proves a probe crossed the link and came back.
+///
+/// ADVISORY ONLY. It never drops the proxy and never changes the recovery
+/// decision: DESIGN.md §11 admits only definite portal evidence for that, and a
+/// heuristic this soft would eventually hold off a recovery someone needed.
+fn suspect_whitelisted_portal(obs: &Observation, st: &State) -> bool {
+    obs.captive == Some(CaptiveState::Clear) && !obs.health_ok && moved_recently(obs, st)
 }
 
 fn hold_for_network(obs: &Observation, st: &State, fails: u32, cfg: &Config) -> bool {
@@ -419,7 +452,18 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                     )));
                 } else {
                     let n = s.health_fails;
-                    if hold_for_network(obs, &s, n, cfg) {
+                    if obs.health_slow {
+                        // Slow is not dead. Recovery is expensive and rare, so
+                        // one patient probe is cheap insurance against
+                        // restarting a tunnel that was carrying traffic.
+                        let t = cfg.health_timeout;
+                        a.push(Action::Log(format!(
+                            "escape tunnel answered a slower probe ({t}s → {}s) — slow, not wedged; not restarting. \
+                             Raise ROWT_HEALTH_TIMEOUT if this link stays this slow",
+                            t * 3
+                        )));
+                        s.health_fails = 0;
+                    } else if hold_for_network(obs, &s, n, cfg) {
                         // The 2026-09-14 hotel, exactly: captive=unknown, three
                         // failed tunnel probes, a reload that could not possibly
                         // succeed because the machine had no path to anything —
@@ -431,6 +475,16 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                             obs.captive.map(|c| c.as_str()).unwrap_or("none")
                         )));
                     } else {
+                        // Once per streak, not once per tick: the streak only
+                        // grows from here while a cooldown holds recovery off.
+                        if n == cfg.health_fails && suspect_whitelisted_portal(obs, &s) {
+                            a.push(Action::Log(
+                                "…on a network joined moments ago whose captive probe says clear — some venues \
+                                 allow the probe host through, so a login page may be waiting: \
+                                 rowt proxy off, log in, then rowt proxy on"
+                                    .into(),
+                            ));
+                        }
                         recover_or_hold(
                             &mut a,
                             &mut s,
@@ -499,8 +553,92 @@ mod tests {
             net_id: "Net 192.0.2.5/192.0.2.1".into(),
             mode: "host".into(),
             health_ok: true,
+            health_slow: false,
             now: 1_000_000,
         }
+    }
+
+    /// #48: a link whose round trip sits ON the probe timeout fails every
+    /// probe by a hair. Three of those used to restart a router that was
+    /// carrying traffic — measured 2026-09-27 on in-flight satellite.
+    #[test]
+    fn a_tunnel_that_is_merely_slow_is_not_restarted() {
+        let cfg = Config::default();
+        let mut o = running();
+        o.health_ok = false;   // the quick probe failed…
+        o.health_slow = true;  // …but a patient one answered
+        let st = State { health_fails: cfg.health_fails - 1, ..State::default() };
+        let r = netcheck(&o, &st, &cfg);
+        assert!(!r.actions.iter().any(|a| matches!(a, Action::Recover { .. })),
+                "a slow tunnel must not be restarted: {:?}", r.actions);
+        assert!(logs(&r).iter().any(|l| l.contains("slow, not wedged")), "{:?}", logs(&r));
+        assert!(logs(&r).iter().any(|l| l.contains("ROWT_HEALTH_TIMEOUT")), "name the knob");
+        // The streak is cleared, so the next failure starts a fresh count
+        // rather than recovering immediately.
+        assert_eq!(r.state.health_fails, 0);
+    }
+
+    /// …and a genuinely dead tunnel is still recovered exactly as before. The
+    /// confirming probe is insurance, not a veto on self-healing.
+    #[test]
+    fn a_dead_tunnel_is_still_recovered_promptly() {
+        let cfg = Config::default();
+        let mut o = running();
+        o.health_ok = false;
+        o.health_slow = false; // the patient probe failed too
+        let st = State { health_fails: cfg.health_fails - 1, ..State::default() };
+        let r = netcheck(&o, &st, &cfg);
+        assert!(r.actions.iter().any(|a| matches!(a, Action::Recover { .. })),
+                "a dead tunnel must still recover: {:?}", r.actions);
+    }
+
+    /// #47: a garden that WHITELISTS the captive probe host. The probe tells
+    /// the truth about itself and lies about the network, so `clear` arrives
+    /// while nothing else can get out. Seen 2026-09-27 in flight.
+    #[test]
+    fn a_whitelisted_probe_host_earns_a_hint_but_never_an_action() {
+        let mut o = running();
+        o.health_ok = false; // the tunnel reaches nothing
+        o.captive = Some(CaptiveState::Clear); // …yet the probe says fine
+        let st = State {
+            health_fails: Config::default().health_fails - 1, // this tick crosses it
+            last_net_change: o.now - 60,                      // joined a minute ago
+            last_net_id: Some(o.net_id.clone()),
+            ..State::default()
+        };
+        let r = netcheck(&o, &st, &Config::default());
+        let hint = logs(&r).iter().any(|l| l.contains("some venues allow the probe host through"));
+        assert!(hint, "expected the hint, got {:?}", logs(&r));
+        // ADVISORY: the proxy is never dropped, and recovery still happens.
+        assert!(!r.actions.iter().any(|a| matches!(a, Action::CaptiveProxyOff(_))));
+        assert!(r.actions.iter().any(|a| matches!(a, Action::Recover { .. })),
+                "the recovery decision must be unchanged: {:?}", r.actions);
+    }
+
+    #[test]
+    fn the_hint_stays_quiet_when_the_shape_does_not_match() {
+        let cfg = Config::default();
+        let base = State {
+            health_fails: cfg.health_fails - 1,
+            last_net_change: 1_000_000 - 60,
+            last_net_id: Some("Net 192.0.2.5/192.0.2.1".into()),
+            ..State::default()
+        };
+        let hinted = |o: &Observation, st: &State| {
+            logs(&netcheck(o, st, &cfg)).iter().any(|l| l.contains("some venues allow"))
+        };
+        // A tunnel failing on a network we have been on for ages is just wedged.
+        let mut o = running();
+        o.health_ok = false;
+        let old = State { last_net_change: 1, ..base.clone() };
+        assert!(!hinted(&o, &old), "an old network is not a fresh garden");
+        // A verdict that is not `clear` is the case hold_for_network owns.
+        let mut o2 = running();
+        o2.health_ok = false;
+        o2.captive = Some(CaptiveState::Unknown);
+        assert!(!hinted(&o2, &base));
+        // And a healthy tunnel says nothing at all.
+        assert!(!hinted(&running(), &base));
     }
 
     fn logs(o: &Outcome) -> Vec<String> {

@@ -77,6 +77,7 @@ fn cfg_of(ctx: &Ctx) -> Config {
         port: ctx.port,
         health_fails: env_or("ROWT_HEALTH_FAILS", "3").parse().unwrap_or(3),
         health_cooldown: env_or("ROWT_HEALTH_COOLDOWN", "600").parse().unwrap_or(600),
+        health_timeout: env_or("ROWT_HEALTH_TIMEOUT", "8").parse().unwrap_or(8),
     }
 }
 
@@ -539,7 +540,7 @@ fn net_id(iface: &str) -> String {
     format!("{ssid} {addr}/{router}").trim().to_string()
 }
 
-fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_host: Option<String>, health_ok: bool) -> Observation {
+fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_host: Option<String>, health_ok: bool, health_slow: bool) -> Observation {
     let p = Mac;
     let svc = p.active_service();
     let iface = p.detect_iface();
@@ -576,6 +577,7 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_
         bound_iface: bound,
         mode: ctx.mode(),
         health_ok,
+        health_slow,
         now: crate::sh_date("+%s").parse().unwrap_or(0),
     }
 }
@@ -816,11 +818,16 @@ fn journal(ctx: &Ctx, cap: CaptiveState) {
 /// server regardless of routing. Two tries, so one dropped packet is not a
 /// verdict.
 fn health_ok(ctx: &Ctx) -> bool {
+    health_ok_within(ctx, env_or("ROWT_HEALTH_TIMEOUT", "8").parse().unwrap_or(8))
+}
+
+/// `_watch_probe <seconds>` — the same probe with an explicit delay timeout, so
+/// the confirming probe above can ask with far more patience.
+fn health_ok_within(ctx: &Ctx, t: u32) -> bool {
     let Some(ep) = lifecycle::controller(ctx) else { return false };   // API gone = wedged
     let secret = lifecycle::clash_secret(ctx);
     let sel = { let s = ctx.sget("selected"); if s.is_empty() { "auto".into() } else { s } };
     let url = env_or("ROWT_HEALTH_URL", "https://www.gstatic.com/generate_204");
-    let t: u32 = env_or("ROWT_HEALTH_TIMEOUT", "8").parse().unwrap_or(8);
     // `python3 -c 'urllib.parse.quote(u, safe="")'` — in-process, same rules.
     let enc = rowt_core::pyurl::quote(&url, "");
     for try_n in 1..=2 {
@@ -1040,7 +1047,7 @@ fn tick(ctx: &Ctx) {
     // `Action::Journal` because that is what the shadow comparison matches
     // against; `perform` skips it below rather than running it twice.
     journal(ctx, cap);
-    let obs = observe(ctx, Some(cap), portal.clone(), portal_host.clone(), true);
+    let obs = observe(ctx, Some(cap), portal.clone(), portal_host.clone(), true, false);
     let g = guard(&obs, &st, &cfg);
     perform_planned(ctx, &g.actions);
     st = g.state;
@@ -1069,7 +1076,15 @@ fn tick(ctx: &Ctx) {
         return;
     }
     let hb = ctx.mode() == "local" || health_ok(ctx);
-    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb);
+    // SLOW is not DEAD: only when the quick probe failed, and only when this
+    // tick would cross the streak, ask once more with real patience. Recovery
+    // is expensive and rare, so one slow probe is cheap insurance against
+    // restarting a tunnel that was carrying traffic all along. Deliberately not
+    // keyed on curl's error kind — a genuinely wedged tunnel times out too.
+    let slow = !hb
+        && st.health_fails + 1 >= cfg.health_fails
+        && health_ok_within(ctx, cfg.health_timeout * 3);
+    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb, slow);
     let n = netcheck(&obs2, &st, &cfg);
     perform_planned(ctx, &n.actions);
     save_state(ctx, &mut disk, &n.state);

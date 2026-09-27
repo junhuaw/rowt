@@ -23,6 +23,10 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   there. A bare `rowt up` chooses local mode by itself when Google answers over the
   physical NIC. Go back with `rowt up host`. Local mode works with a China corp VPN
   up, because direct is bound to the NIC.
+- **A venue whose login page never appears while rowt says the network is fine**:
+  some in-flight and lounge networks let rowt's probe host through on purpose, so
+  rowt sees `clear` and never drops the proxy. `watch.log` says so when it spots
+  the shape. Fix by hand: `rowt proxy off`, log in, `rowt proxy on`.
 - **Captive portals (hotel, airport, plane Wi-Fi)**: automatic with the watchdog. It
   probes directly at the Wi-Fi's own resolver, drops the system proxy so the login
   page can load, opens that page in the browser, and restores the proxy after login.

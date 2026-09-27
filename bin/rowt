@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.17"
+ROWT_VERSION="3.5.18"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4583,21 +4583,35 @@ _boot_id() { sysctl -n kern.boottime 2>/dev/null | sed -n 's/[^0-9]*\([0-9][0-9]
 # a flaky direct-to-CDN path in a censored network produced failures that had
 # nothing to do with the tunnel. The delay test forces traffic through the escape
 # server regardless of routing. Two tries so one dropped packet isn't 'wedged'.
+# $1 = the delay timeout in seconds (default HEALTH_TIMEOUT). Parameterised for
+# the confirming probe below, which asks again with far more patience.
 _watch_probe() {
-  local ep sec sel enc out t
+  local ep sec sel enc out t to="${1:-$HEALTH_TIMEOUT}"
   ep="$(controller 2>/dev/null || true)"; [ -n "$ep" ] || return 1   # API gone = wedged
   sec="$(clash_secret)"
   sel="$(sget selected)"; sel="${sel:-auto}"                          # concrete server, or 'auto' (urltest)
   enc="$(_urlencode "$HEALTH_URL")"
   for t in 1 2; do
     # curl max-time must exceed the clash delay timeout or it cuts the test early.
-    out="$(curl --noproxy '*' -sS -m "$(( HEALTH_TIMEOUT + 3 ))" -H "Authorization: Bearer $sec" \
-          "http://$ep/proxies/$sel/delay?timeout=${HEALTH_TIMEOUT}000&url=$enc" 2>/dev/null || true)"
+    out="$(curl --noproxy '*' -sS -m "$(( to + 3 ))" -H "Authorization: Bearer $sec" \
+          "http://$ep/proxies/$sel/delay?timeout=${to}000&url=$enc" 2>/dev/null || true)"
     printf '%s' "$out" | jq -e '.delay // empty' >/dev/null 2>&1 && return 0
     [ "$t" = 1 ] && sleep 2
   done
   return 1
 }
+
+# SLOW is not DEAD. A link whose round trip sits ON ROWT_HEALTH_TIMEOUT fails
+# every probe by a hair, and three of those used to restart a router that was
+# carrying traffic the whole time — measured 2026-09-27 on in-flight satellite:
+# 0/20 probes at the 8s default, 20/20 at 25s, every RTT 7.6-8.8s, and the
+# watchdog restarting a healthy tunnel every ten minutes.
+#
+# So before recovery, ask ONCE more with real patience. Recovery is expensive
+# and rare; one slow probe is cheap insurance. Deliberately NOT keyed on curl's
+# error kind: a genuinely wedged tunnel times out too, so "only recover on
+# connection-refused" would disable self-healing for the common case.
+_watch_probe_confirm() { _watch_probe "$(( HEALTH_TIMEOUT * 3 ))"; }
 
 # Cooldown-gated, SELF-VERIFYING recovery. $1 = reason (logged); the rest is the
 # recovery command (cmd_reload — it re-renders, starts if down / restarts if up,
@@ -4725,6 +4739,7 @@ _watch_shadow() {
       --argjson pointing "${_SH2_POK:-false}" \
       --argjson bypass "${_SH2_BOK:-false}" \
       --argjson health "$([ "${_SH2_HEALTH:-ok}" = ok ] && echo true || echo false)" \
+      --argjson slow "${_SH2_SLOW:-false}" \
       --argjson fails "${_SH_FAILS0:-0}" \
       --argjson lastrec "${_SH_LASTREC0:-0}" \
       --argjson lastnetchg "${_SH_LASTNETCHG0:-0}" \
@@ -4733,7 +4748,7 @@ _watch_shadow() {
       '{obs:{proxy_intent:"", captive:"clear", active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
-             bound_iface:$cur, net_id:$nid, health_ok:$health, now:$now, gateway_ok:$gwok,
+             bound_iface:$cur, net_id:$nid, health_ok:$health, health_slow:$slow, now:$now, gateway_ok:$gwok,
              mode:(if $mode == "" then "host" else $mode end)},
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
                last_recovery:$lastrec, last_net_change:$lastnetchg}}' > "$obs2" 2>/dev/null
@@ -5016,6 +5031,17 @@ _watch_health() { # $1=iface  $2=captive verdict
     if [ -n "$gw" ] && _watch_gateway_alive "$gw"; then gwok=1; fi
   fi
   _SH2_GWOK="$([ "$gwok" = 1 ] && echo true || echo false)"
+  # SLOW is not DEAD: ask once more with real patience before restarting a
+  # tunnel that may simply be far away. See `_watch_probe_confirm`.
+  if _watch_probe_confirm; then
+    _SH2_SLOW=true
+    local sm="escape tunnel answered a slower probe (${HEALTH_TIMEOUT}s → $(( HEALTH_TIMEOUT * 3 ))s) — slow, not wedged; not restarting. Raise ROWT_HEALTH_TIMEOUT if this link stays this slow"
+    _watch_log "$sm"
+    _wact "log $sm"
+    rm -f "$WATCH_HEALTH"
+    return 0
+  fi
+  _SH2_SLOW=false
   if _watch_hold_for_network "$cap" "$fails" "$gwok" "$now"; then
     # The 2026-09-14 hotel, exactly: the reload could not possibly succeed, and
     # it burned the 600s cooldown and logged a failure that reads as a tunnel
@@ -5024,6 +5050,22 @@ _watch_health() { # $1=iface  $2=captive verdict
     _watch_log "$m"
     _wact "log $m"
     return 0
+  fi
+  # A garden that WHITELISTS the probe host answers it truthfully and lies about
+  # the network: the verdict is `clear` while every real connection waits for a
+  # login. Seen 2026-09-27 on a flight — joined 13:11:56, `clear` at 13:12:44,
+  # the escape probe failing throughout, and the user had to log in by hand.
+  # The tell is the combination: joined moments ago, probe says clear, tunnel
+  # reaches nothing. Once per streak (at the threshold), since the streak only
+  # grows from here while a cooldown holds recovery off.
+  #
+  # ADVISORY: it never drops the proxy and never changes the recovery decision —
+  # DESIGN §11 admits only definite portal evidence for that.
+  # Mirrors `rowt_core::watch::suspect_whitelisted_portal`.
+  if [ "$fails" -eq "$HEALTH_FAILS" ] && [ "$cap" = clear ] && _watch_moved_recently "$now"; then
+    local w="…on a network joined moments ago whose captive probe says clear — some venues allow the probe host through, so a login page may be waiting: $PROG proxy off, log in, then $PROG proxy on"
+    _watch_log "$w"
+    _wact "log $w"
   fi
   _watch_recover "tunnel wedged ($fails consecutive probe failures)" cmd_reload
 }

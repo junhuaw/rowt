@@ -423,7 +423,9 @@ PARITY_SCENARIO=lanes-empty explain anything.example
 
 # use / config / metrics / router
 PARITY_SCENARIO=lanes-empty use
-use alpha
+# Renders and writes the whole config tree on both sides; same 25s timeout
+# flake as `ping` above, same 2/2 in isolation.
+PARITY_TIMEOUT=45 use alpha
 use auto
 use nosuchtag
 PARITY_SCENARIO=render-local use alpha
@@ -505,7 +507,10 @@ router status
 PARITY_TIMEOUT=3 router log
 
 # ping / run
-PARITY_UNORDERED=1 ping
+# Slow by nature: it starts a router for its own test, on BOTH sides. It
+# timed out at the 25s default on a busy machine (2026-09-27) while passing
+# 2/2 in isolation — a gate that cries wolf gets ignored, so give it room.
+PARITY_TIMEOUT=45 PARITY_UNORDERED=1 ping
 PARITY_UNORDERED=1 PARITY_SCENARIO=router-up ping
 PARITY_SCENARIO=router-up ping alpha
 PARITY_UNORDERED=1 PARITY_SCENARIO=lanes-empty ping

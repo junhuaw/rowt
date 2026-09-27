@@ -82,6 +82,7 @@ fn run() -> Result<String, String> {
         net_id: s(o, "net_id"),
         mode: s(o, "mode"),
         health_ok: b(o, "health_ok"),
+        health_slow: b(o, "health_slow"),
         now: o.get("now").and_then(|x| x.as_i64()).unwrap_or(0),
     };
     let empty = Value::Object(Default::default());
