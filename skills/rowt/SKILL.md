@@ -198,7 +198,9 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
    `rowt proxy on` if the old client cleared the proxy on quit), then `rowt status`.
 8. **Corp lane** (mostly automatic). The corp network's DHCP search domains and the
    corp VPN's routes are mirrored into the corp lane by `rowt corp sync`, which the
-   watchdog runs on connect. On the corp network, show the user `rowt corp suggest`
+   watchdog runs on connect. It mirrors only enterprise-internal ranges: a public
+   range the VPN routes is refused and named with the `corp add` that would allow
+   it, because those ranges host third parties too. On the corp network, show the user `rowt corp suggest`
    and add anything missing with `rowt corp add <suffix|CIDR>`. You may propose
    suffixes from the company name, but confirm first. For Tailscale, add `tailscale`
    to `~/.config/rowt/sync-ifaces.txt`.

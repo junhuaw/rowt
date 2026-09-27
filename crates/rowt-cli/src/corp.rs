@@ -295,6 +295,47 @@ pub fn sync(ctx: &Ctx, quiet: bool) -> Result<String, String> {
     run(ctx, &Opts { dry_run: false, no_reload: false, quiet, iface: None })
 }
 
+/// `<cidr>\t<epoch>` lines. A malformed line is skipped, never fatal: the file
+/// is a cache, and losing it must not break a sync. `_seen_map` in the Python.
+fn read_seen(path: &Path) -> std::collections::BTreeMap<String, i64> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(body) = std::fs::read_to_string(path) else { return out };
+    for raw in body.lines() {
+        let f: Vec<&str> = raw.split_whitespace().collect();
+        if f.len() != 2 {
+            continue;
+        }
+        if let (Ok(n), Ok(t)) = (f[0].parse::<rowt_core::reconcile::Ipv4Net>(), f[1].parse::<i64>()) {
+            out.insert(n.trunc().to_string(), t);
+        }
+    }
+    out
+}
+
+/// Name what rule 1 refused to mirror, and the command that would allow it.
+///
+/// A corp VPN may legitimately route globally-routable space — an employer's
+/// own cloud tenancy lives there. rowt still will not mirror it automatically,
+/// because those same ranges host everyone ELSE's sites, and sending those
+/// through the employer's VPN is never what the user meant. On 2026-09-27 one
+/// protocol switch put 22.8 million addresses of third-party cloud into the
+/// corp lane this way. `_corp_report_refused` in the shell.
+fn report_refused(refused: &[rowt_core::reconcile::Ipv4Net], quiet: bool) {
+    if refused.is_empty() || quiet {
+        return;
+    }
+    let n = refused.len();
+    eprintln!(
+        "warning: corp sync: {n} public range(s) the VPN routes were NOT mirrored — they also host third parties."
+    );
+    for c in refused.iter().take(8) {
+        eprintln!("warning:     {c}   →  {} corp add {c}", crate::PROG);
+    }
+    if n > 8 {
+        eprintln!("warning:     … and {} more (see '{} corp sync --dry-run')", n - 8, crate::PROG);
+    }
+}
+
 pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
     let cfg = &ctx.cfg;
     let path = cfg.join("corp-domains.txt");
@@ -332,13 +373,34 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
     let private: Vec<String> = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
                                 "100.64.0.0/10", "169.254.0.0/16"]
         .iter().map(|s| s.to_string()).collect();
-    use rowt_core::reconcile::{load, reconcile, Outcome};
-    let r = reconcile(
+    use rowt_core::reconcile::{load, reconcile_with, Opts as ROpts, Outcome};
+    // `tunnel_up` lets the reconcile PRUNE to what the tunnel actually routes;
+    // with none up the block is frozen, which is the in-office case. The seen
+    // cache ages entries out for a machine whose tunnel never comes up. Rule 1
+    // (never mirror a globally-routable range) needs no flag. See
+    // config/corp-sync-reconcile.py — the shell passes exactly the same.
+    // Under cache/: a timestamp cache, regenerated from the tunnel, alongside
+    // the other machine-specific state `config export` and the fsstate
+    // snapshot skip by design.
+    let seen_path = ctx.cfg.join("cache").join("corp-sync-seen.tsv");
+    let _ = std::fs::create_dir_all(ctx.cfg.join("cache"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (r, report) = reconcile_with(
         &load(&active.join("\n")),
         &load(&handadded_cidrs(&body).join("\n")),
         &load(&cur_cidr.join("\n")),
         &load(&private.join("\n")),
+        &ROpts { tunnel_up: nup > 0, now, max_age_days: 30 },
+        &read_seen(&seen_path),
     );
+    // 0600: it lists the employer's route table.
+    let seen_body: String =
+        report.seen.iter().map(|(c, t)| format!("{c}\t{t}\n")).collect();
+    let _ = std::fs::write(&seen_path, &seen_body);
+    let _ = crate::set_mode(&seen_path, 0o600);
     // NOCHANGE keeps the existing block VERBATIM rather than re-emitting an
     // equivalent one — that is what stops a cosmetic re-ordering from rewriting
     // the file and triggering a reload on every watchdog tick.
@@ -400,6 +462,7 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
         }
         return Ok(String::new());
     }
+    report_refused(&report.refused, o.quiet);
     if !o.quiet {
         for d in &dropped {
             eprintln!("error: corp sync: '{d}' is DHCP-advertised but you keep it in escape/block/hotspot — your rule wins");

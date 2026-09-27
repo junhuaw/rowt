@@ -554,8 +554,13 @@ cmd_reconcile_diff() { # [count]
   n="$(python3 "$SELF/gen-reconcile-cases.py" "$work" "${1:-200}")"
   for d in "$work"/case*; do
     local a="$d/active" h="$d/handadded" b="$d/block" p="$d/private"
-    python3 "$py" --active "$a" --handadded "$h" --block "$b" --private "$p" > "$d/py.out" 2>"$d/py.err" || true
-    "$rust"       --active "$a" --handadded "$h" --block "$b" --private "$p" > "$d/rs.out" 2>"$d/rs.err" || true
+    # Rules 2 and 3 change the argv, so a case may carry extra flags in `opts`
+    # (empty for every case written before they existed).
+    local opts=""; [ -f "$d/opts" ] && opts="$(cat "$d/opts")"
+    # shellcheck disable=SC2086 — the opts line is intentionally word-split
+    python3 "$py" --active "$a" --handadded "$h" --block "$b" --private "$p" $opts > "$d/py.out" 2>"$d/py.err" || true
+    # shellcheck disable=SC2086
+    "$rust"       --active "$a" --handadded "$h" --block "$b" --private "$p" $opts > "$d/rs.out" 2>"$d/rs.err" || true
     if ! diff -q "$d/py.out" "$d/rs.out" >/dev/null 2>&1; then
       fails=$((fails + 1))
       if [ "$fails" -le 3 ]; then

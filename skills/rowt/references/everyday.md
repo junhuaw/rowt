@@ -76,6 +76,10 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   domains and routed CIDRs; the watchdog runs it on connect. Learned entries persist
   when the tunnel drops, because they're still needed in the office. Private and
   overlay ranges already go to the corp lane.
+  - **Only enterprise-internal ranges are mirrored automatically.** A VPN often
+    routes its employer's public cloud space, and those ranges host everyone else
+    too, so rowt refuses them and names each one with the `rowt corp add <cidr>`
+    that would allow it. The user decides; a hand-added CIDR is never touched.
   - For Tailscale or other overlays, list the interface label in
     `~/.config/rowt/sync-ifaces.txt`.
   - A user's own escape or block entry always wins over an auto-discovered corp domain.

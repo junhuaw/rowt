@@ -165,7 +165,8 @@ configures itself:
   non-Tailscale tunnel); add `tailscale` to reach tailnet hosts through the
   proxy too.
 
-Two properties keep it cheap and safe:
+Two properties keep it cheap and safe, and three rules bound what it can grow
+into:
 
 - **Superset reconcile, minimal reloads** (`config/corp-sync-reconcile.py`): the
   lane only has to *contain* every live route. While it does, nothing is
@@ -174,6 +175,30 @@ Two properties keep it cheap and safe:
   live route (whole, never shrunk), and keep stale CIDRs from a now-down tunnel —
   they're still needed in-office, where the same ranges are on the LAN and no
   tunnel is up. Hand-added entries are never touched.
+- **A globally-routable range is never mirrored automatically.** A corp VPN
+  really does route its employer's cloud tenancy — and those same ranges host
+  everyone else's sites, so following the VPN there would send a stranger's
+  shopping through your employer's network. Only enterprise-internal space
+  mirrors: RFC1918 and friends, plus the DoD-assigned `/8`s (`11/8`, `26/8`,
+  `30/8`, `33/8`, …) that large organisations use internally and that host
+  nobody else. A refused range is *named*, with the `rowt corp add <cidr>` that
+  would allow it — the choice is the operator's, not the network's. Hand-added
+  CIDRs are unaffected, and one that predates the rule is evicted rather than
+  grandfathered.
+
+  *Why it exists:* on 2026-09-27 a corp VPN briefly advertised 246 routes,
+  including `8.128.0.0/10`, `43.0.0.0/9` and `47.96.0.0/11`. 69 CIDRs — 22.8
+  million addresses of third-party cloud — entered the lane and **stayed**,
+  because the no-change fast path keeps the block verbatim and the drop rule
+  only ever removes a CIDR that *overlaps* a live route. One transient route
+  table had permanently changed where a large slice of the internet went.
+- **The block shrinks, not only grows.** While a tunnel is **up** the block
+  means "what this tunnel routes beyond the hand-added entries", so a CIDR no
+  live route needs is dropped; with every tunnel **down** it is frozen, which is
+  the in-office case above. As a backstop for a machine whose tunnel never comes
+  up, a CIDR unseen for 30 days expires (`cache/corp-sync-seen.tsv`, a
+  regenerable cache). And "no change" now means *nothing was filtered either* —
+  reporting no-change after dropping something is what made the 69 permanent.
 - **Private/overlay ranges are excluded from tracking.** Live routes inside
   RFC1918 / CGNAT / link-local are filtered out of the reconcile entirely: the
   private-range fall-through (§3) already sends that whole class to the corp
