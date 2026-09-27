@@ -282,6 +282,35 @@ pub fn here_dir() -> PathBuf {
     d.join("..").canonicalize().unwrap_or_else(|_| d.to_path_buf())
 }
 
+/// The path the LaunchAgent should name: the FRONT DOOR as the user reaches it,
+/// never this binary. `_watch_self` in the shell — `command -v rowt`, else the
+/// `bin/rowt` beside us — and `ROWT_SELF` overrides both, which is what
+/// bin/rowt exports when it delegates here.
+///
+/// Why it matters twice over: the two implementations must write ONE plist
+/// (there is a gate on it now), and rowt-rs is ad-hoc-signed with a cdhash that
+/// changes every release, so naming it would hand launchd a constraint that
+/// stops matching at the next upgrade. PORTING.md §2.1.
+pub fn watch_self() -> PathBuf {
+    if let Ok(v) = std::env::var("ROWT_SELF") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for d in path.split(':').filter(|d| !d.is_empty()) {
+            let c = Path::new(d).join("rowt");
+            if c.is_file() && std::fs::metadata(&c).map(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o111 != 0
+            }).unwrap_or(false) {
+                return c;
+            }
+        }
+    }
+    here_dir().join("bin/rowt")
+}
+
 /// `cmd_probe` — which escape mode works here?
 ///
 /// Reaches every server BOTH via the default route and bound to the physical
@@ -587,8 +616,12 @@ fn cmd_proxy(cfg: &Path, action: &str, arg: Option<&str>) -> Result<(String, boo
             };
             Ok((
                 format!(
-                    "system proxy (service '{svc}'):\n  socks:  {}\n  https:  {}\n  bypass: {}\n  CLI env: eval \"$({PROG} proxy env)\"   (off: {PROG} proxy env --off)",
+                    // All THREE protocols rowt sets, in the order
+                    // proxy_pointing_ok checks them — `http` was missing from
+                    // this display until 2026-09-27 (#52).
+                    "system proxy (service '{svc}'):\n  socks:  {}\n  http:   {}\n  https:  {}\n  bypass: {}\n  CLI env: eval \"$({PROG} proxy env)\"   (off: {PROG} proxy env --off)",
                     read("-getsocksfirewallproxy"),
+                    read("-getwebproxy"),
                     read("-getsecurewebproxy"),
                     rowt_platform::read_bypass(&svc),
                 ),
@@ -1076,7 +1109,8 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         "onboard" => Ok(onboard::run(&Ctx::new(cfg.clone()), &here_dir())),
         "watch" => {
             let ctx = Ctx::new(cfg.clone());
-            let me = std::env::current_exe().map_err(|e| e.to_string())?;
+            // The agent names the FRONT DOOR, never this binary — see watch_self.
+            let me = watch_self();
             watch::cmd(&ctx, &me, rest.first().map(|s| s.as_str()).unwrap_or("status"))
         }
         "vm" => {

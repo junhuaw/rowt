@@ -244,7 +244,7 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
 | route a site | `rowt escape\|corp\|block\|hotspot add <entry>` (one lane per entry) · `geosite:<name>` (escape and block only) |
 | after a network change | automatic with the watchdog; otherwise `rowt reload` |
 | switch server | `rowt ping` → `rowt use <tag>` / `rowt use auto` |
-| a venue's login page | automatic with the watchdog; recurring venue: `rowt hotspot add <portal-host>` |
+| a venue's login page | automatic with the watchdog; recurring venue: `rowt hotspot add <portal-host>` — `watch.log` names the host and prints the exact command |
 | abroad, no firewall | `rowt up local` (back: `rowt up host`) |
 | CLI tools | `rowt run <cmd>` · `rowt proxy env` · `rowt-proxy-on` (from shell-init) |
 | watch it live | `rowt monitor` (user's terminal) · `rowt metrics top` |

@@ -326,7 +326,15 @@ resolver, where the portal's hijack lives, and re-probing a few times right
 after a network change), drops the system proxy when it sees one, **opens the
 portal's login page in your browser** (the request the OS made before the drop
 died on the proxy, and nothing retries it), and restores the proxy once login
-clears. That still leaves a gap of up to a tick before the page appears, and
+clears. It also writes the portal's **own hostname** into
+`~/.config/rowt/log/watch.log`, with the ready-made `rowt hotspot add` line for
+it — taken from the redirect, or out of the page itself when the portal answers
+inline, following one hop for the venues (Aruba is the common one) that bounce
+you through the probe's own address before naming themselves. That is the one
+thing you need afterwards and the one thing nothing used to record. Only the
+host is logged, never the query string, which carries your MAC and IP.
+
+That still leaves a gap of up to a tick before the page appears, and
 it needs the watchdog to be installed and the portal to show up in its probe —
 so for venues you keep coming back to, put the portal's hostname in the
 **hotspot lane**:

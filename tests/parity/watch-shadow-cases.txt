@@ -18,6 +18,9 @@ PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tic
 # A 200-inline portal names itself only in its BODY; both sides must pull the
 # host out of it and print the 'hotspot add' line (task #46).
 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick | captive portal host: portal.fakelounge.example
+# …and an Aruba-style one names itself only on the hop AFTER a refresh back to
+# the PROBE's own host, which is why #46 still found nothing at SFO (task #50).
+PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/aruba watch tick | captive portal host: portal.fakearuba.example
 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | captive portal cleared
 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/redirect watch tick | opening its login page in the browser — http://portal.fake/login
 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick

@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.18"
+ROWT_VERSION="3.5.19"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3126,6 +3126,49 @@ _captive_body_url() { # $1=body $2=probe host
     || true
 }
 
+# The portal's redirect HOP, for a body whose only URL points back at the probe
+# host. Aruba ClearPass/Instant answers the probe 200 with a refresh to
+# `…/hotspot-detect.html?cmd=redirect&arubalp=<n>` on the PROBE's own host, and
+# only names itself on the hop after that. `_captive_body_url` skips it — and
+# rightly, an unqualified self-reference is not a portal address — so the SFO
+# episode of 2026-09-27 logged no portal at all on the version that shipped the
+# feature. A query string is what tells a hop from a self-reference, and it must
+# differ from the probe URL so a ROWT_CAPTIVE_URL that already carries one
+# cannot send us to re-fetch ourselves. `&amp;` is decoded because that is what
+# a browser sends, and the portal reads these as real parameters.
+_captive_body_hop() { # $1=body $2=probe host $3=probe url
+  printf '%s' "$1" | tr -d '\r' \
+    | grep -oE 'https?://[A-Za-z0-9._~%-]+(:[0-9]+)?(/[^"'"'"'<>[:space:]]*)?' 2>/dev/null \
+    | awk -F/ -v keep="${2:-}" -v self="${3:-}" \
+        '{ h=$3; sub(/:.*/,"",h); if (h != "" && h == keep && $0 ~ /\?/ && $0 != self) { print; exit } }' \
+    | sed 's/&amp;/\&/g' \
+    || true
+}
+
+# Follow that hop ONCE, unproxied, on the same budget and the same --resolve
+# pin as the probe itself — the hop is on the probe's host, which is precisely
+# the name the DHCP resolver was pinned for. Not `-L`: one request, and the
+# portal names itself in this response's redirect. Advisory only, like
+# `_captive_body_url`: what gets OPENED is still the probe URL.
+#
+# Nothing from the hop's answer is logged but the HOST. Its query carries the
+# client's MAC, IP and SSID, and `arubalp` is a session token.
+_captive_follow_hop() { # $1=hop url $2=resolve arg (may be empty) -> portal host
+  local out rc=0 redir body ph h
+  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${2:+--resolve "$2"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$1" 2>/dev/null)" || rc=$?
+  [ "$rc" = 0 ] || { _captive_log "hop       $(_curl_why "$rc") (rc=$rc) url=$(_url_noquery "$1")"; return 0; }
+  redir="${out##*$'\n'}"; redir="${redir#redirect=}"
+  # Peel the redirect line, then the status line: the status is not consulted
+  # here — a portal naming itself is worth having whatever code it answered.
+  out="${out%$'\n'*}"; body="${out%$'\n'*}"
+  ph="$(_url_host "$1")"
+  h="$(_url_host "$redir")"
+  if [ -z "$h" ] || [ "$h" = "$ph" ]; then
+    h="$(_url_host "$(_captive_body_url "$body" "$ph")")"
+  fi
+  printf '%s' "$h"
+}
+
 # curl's exit status is the discriminator worth keeping; name the few that
 # actually distinguish one dead network from another.
 _curl_why() {
@@ -3166,6 +3209,11 @@ _captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty $3=labe
     portal="$(_url_host "${redir:-}")"
     [ "$portal" = "$phost" ] && portal=""
     [ -n "$portal" ] || portal="$(_url_host "$(_captive_body_url "$body" "$phost")")"
+    # Still nothing: the body may only carry the portal's own redirect hop.
+    if [ -z "$portal" ]; then
+      local hop; hop="$(_captive_body_hop "$body" "$phost" "$url")"
+      [ -z "$hop" ] || portal="$(_captive_follow_hop "$hop" "$rsv")"
+    fi
   fi
   # A clear verdict needs no explaining; everything else is what a later reader
   # is trying to account for.
@@ -3357,7 +3405,13 @@ cmd_proxy() {
     status)
       [ -n "$svc" ] || { echo "system proxy: no active network service (nothing configured)"; return 0; }
       echo "system proxy (service '$svc'):"
+      # All THREE protocols rowt sets, in the order _proxy_pointing_ok checks
+      # them. `http` was missing here until 2026-09-27 (#52): the watchdog has
+      # always read it, so a web proxy that was off alone WOULD be repaired —
+      # but this display, the command you run to ask "is my proxy set", showed
+      # a clean bill of health while plain HTTP bypassed rowt entirely.
       echo "  socks:  $(networksetup -getsocksfirewallproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
+      echo "  http:   $(networksetup -getwebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
       echo "  https:  $(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
       echo "  bypass: $(networksetup -getproxybypassdomains "$svc" 2>/dev/null | tr '\n' ' ')"
       echo "  CLI env: eval \"\$($PROG proxy env)\"   (off: $PROG proxy env --off)"
@@ -4540,7 +4594,7 @@ WATCH_NETCHANGE="$CFG/watch.netchange"       # epoch of the last network change 
 # diff would call it stale forever and rewrite on every tick.
 #   v2 = adds AbandonProcessGroup (without it launchd SIGKILLs the router a tick
 #        starts, the moment that tick exits — silent ~10-minute outages).
-WATCH_PLIST_VERSION="2"
+WATCH_PLIST_VERSION="3"
 WATCH_PLIST_MARK="rowt-watch-plist v$WATCH_PLIST_VERSION"
 WATCH_SELFHEAL="$CFG/watch.plistheal"        # epoch of the last plist self-heal (anti-loop)
 WATCH_CPU="$CFG/watch.cpu"                   # last CPU/traffic sample: "epoch cpusecs pid bytes"
@@ -5106,8 +5160,17 @@ _watch_plist_body() {
      The marker is how a tick spots an agent written by an older rowt and re-syncs it. -->
 <dict>
   <key>Label</key><string>$WATCH_LABEL</string>
+  <!-- Program is /bin/sh, not rowt itself. Background Task Management pins the
+       program's CODE-SIGNING IDENTITY at login (an LWCR); when that identity
+       stops matching, launchd refuses the job with EX_CONFIG and logs nothing.
+       /bin/sh is a platform binary whose identity never moves, so the agent
+       survives any rowt upgrade — including a future where this Program would
+       otherwise be the ad-hoc-signed rowt-rs. PORTING.md §2.1. -->
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec "\$0" "\$@"</string>
     <string>$self</string>
     <string>watch</string>
     <string>tick</string>
@@ -7183,6 +7246,13 @@ main() {
     # and is quietly handed bash collects a window's worth of evidence about the
     # wrong implementation.
     [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
+    # The LaunchAgent must name the FRONT DOOR, never whichever binary happened
+    # to write it. rowt-rs is ad-hoc-signed and its cdhash changes every
+    # release, and a launch constraint pins code identity (PORTING.md §2.1) —
+    # but the plain reason is parity: without this the two implementations
+    # write a different <string> into the same plist. Hand over the same path
+    # `_watch_self` picks, so there is one answer.
+    export ROWT_SELF="${ROWT_SELF:-$(_watch_self)}"
     exec "$_rb" "$@"
   fi
   _setup_py_helpers

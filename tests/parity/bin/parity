@@ -273,6 +273,19 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
           "${f#.}"
       done
   ) >> "$out/fsstate"
+  # The LaunchAgent plist is not in the config tree either — `watch install`
+  # writes it to ~/Library/LaunchAgents — and until 2026-09-27 nothing compared
+  # it, so `watch install` passed cli-diff while the two implementations wrote a
+  # DIFFERENT <string> for Program (the shell its own path, rowt-rs its own
+  # executable). Same blind spot the rc files needed covering for; task #51.
+  ( cd "$out/home/Library/LaunchAgents" 2>/dev/null || exit 0
+    find . -type f | sort | while read -r f; do
+        printf '%s %s  ~/Library/LaunchAgents/%s\n' \
+          "$(normalize "$f" "$out" | cksum | awk '{print $1}')" \
+          "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null || echo '?')" \
+          "${f#./}"
+      done
+  ) >> "$out/fsstate"
 }
 
 # ---------------------------------------------------------------- normalize

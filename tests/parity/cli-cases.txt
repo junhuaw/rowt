@@ -96,6 +96,12 @@ proxy env
 proxy env --off
 proxy check
 proxy status
+# The state #52 was about: socks + https point at rowt, plain HTTP does NOT.
+# `proxy check` always caught it (_proxy_pointing_ok reads all three); `proxy
+# status` did not SHOW it until the http row was added, so the command you run
+# to ask "is my proxy set" gave a partial proxy a clean bill of health.
+PARITY_SCENARIO=proxy-partial proxy status
+PARITY_SCENARIO=proxy-partial proxy check
 escape import tests/parity/fixtures/import-list.txt
 corp import tests/parity/fixtures/import-list.txt
 # A file that is not there is an error (die, ABORT in the audit log), not an
@@ -145,6 +151,9 @@ PARITY_NOTRACE=1 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
 # while the machine was busy, on a run where nothing was wrong.
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=captive-dhcp-dns watch tick
 PARITY_NOTRACE=1 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
+# The Aruba shape: the body's only URL points back at the PROBE's host with a
+# query, so the portal is named only by following that hop once (task #50).
+PARITY_NOTRACE=1 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/aruba watch tick
 PARITY_NOTRACE=1 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 # …and the one tick that needs NO exemption, because a hands-off tick reads
 # NOTHING: with `proxy_intent=off` both sides must leave an empty trace. The

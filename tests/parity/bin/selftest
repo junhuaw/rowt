@@ -1063,6 +1063,31 @@ else
   cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
 fi
 
+echo "37. the LaunchAgent plist must be inside what cli-diff compares"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # `watch install` writes to ~/Library/LaunchAgents, which is OUTSIDE the
+  # config tree — so until 2026-09-27 snapshot_fs never looked at it, and the
+  # two implementations wrote a different Program and a different agent
+  # environment while every gate stayed green (#51). Change the Program on one
+  # side only; if cli-diff still passes, the plist has fallen out of the
+  # compared surface again. Uses the plain `watch install` case on purpose: the
+  # no-tty one stops before writing anything (step 35).
+  perl -0pi -e 's|<string>/bin/sh</string>|<string>/bin/bash</string>|' "$tmp/bin/rowt"
+  if grep -qF "<string>/bin/sh</string>" "$tmp/bin/rowt"; then
+    bad "could not change the agent's Program (_watch_plist_body moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'watch install')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the two sides writing a different LaunchAgent Program"
+  else
+    ok "cli-diff caught a LaunchAgent written with a different Program"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

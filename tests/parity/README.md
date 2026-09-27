@@ -36,6 +36,16 @@ tests/parity/bin/parity cli-diff         # whole commands, rowt-rs vs the shell
 tests/parity/bin/selftest                # break each gate; every one must fire
 ```
 
+**Do not run `cargo` while a gate is running.** Every cross-implementation gate
+execs `target/release/rowt-rs`, and `cargo test` removes that binary while it
+builds its own test harness — so a `cargo test` in another terminal turns the
+whole run into `rc(0/127)` failures that look like a catastrophic regression and
+are nothing of the sort. It cost one confusing 192-case "failure" on
+2026-09-27. Build first, then run the gate, then touch the tree.
+```sh
+cargo build --release --workspace && tests/parity/bin/parity cli-diff
+```
+
 ## Proving the gates can fail
 
 Everything above is pass-side evidence, and a suite that has only ever agreed
@@ -108,7 +118,8 @@ missing shim. It found a real divergence the day it was added: `rowt-rs` ignored
 a failed proxy write and carried on, where the shell dies.
 
 Four artifacts come out of each run: `stdout`, `stderr`, `rc`, `trace` (every
-shimmed call with its argv) and `fsstate` (the config tree afterwards,
+shimmed call with its argv) and `fsstate` (the config tree afterwards, plus the
+two things that live BESIDE it — the shell rc files and the LaunchAgent plist —
 checksummed over *normalized* content).
 
 Each case also runs in its own **session**, with no controlling terminal. That
@@ -216,7 +227,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 6 cases |
 | `platform-diff` | the argv the platform layer produces | 10 cases |
-| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 331 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 367 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -279,6 +290,13 @@ payloads, ss userinfo and subscription bodies so the gate holds the rule, and
 both sides run, it snapshots the whole config tree — every file except logs,
 pidfiles, caches and the sing-box binary — as a normalized checksum plus the
 file MODE, and requires the two to match.
+
+Two things rowt writes are NOT in that tree and are walked separately: the
+shell rc files in `$HOME`, and `~/Library/LaunchAgents/*.plist`. Both were
+blind spots that let a real divergence reach a release — `shell-init --install`
+did nothing on the Rust side while every gate stayed green, and `watch install`
+wrote a different `Program` and a different agent environment on each side
+(#51). If rowt writes it outside `~/.config/rowt`, it needs a line here.
 
 That was added for the pool arms (`server add|rm|clear`, `sub add|rm|update|clear`),
 and it is what makes them gateable at all: what those commands DO is write

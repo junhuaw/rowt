@@ -71,6 +71,48 @@ tests and exactly one platform subprocess (`scutil --dns`) behind it.
 | Captive probe | `curl --noproxy` | identical | free |
 | VM escape variant | Lima + socket_vmnet | n/a — its purpose is "run the engine in a Linux guest"; moot on Linux | gate `cfg(target_os = "macos")`, do not port |
 
+### 2.1 The LaunchAgent's `Program` is load-bearing — keep it unsignable
+
+Background Task Management attaches a launch constraint (LWCR) when launchd
+loads an agent at login, pinning the program's **code-signing identity**; once
+that identity stops matching, launchd refuses the job with `EX_CONFIG` (78) and
+logs nothing. `launchctl print` shows two flags and only the second can deny:
+`managed LWCR` (BTM tracks the job) and `has LWCR` (a constraint is attached).
+An unsigned script has no identity to pin. Measured on this Mac: all five
+agents whose program is an unsigned script carry `managed LWCR` alone — one of
+them 15,004 launches clean — while all three whose program is a signed Mach-O
+(platform `bash`, plus two ad-hoc-signed Homebrew binaries) also carry
+`has LWCR`. `bin/rowt` is an unsigned bash script, so the shipped watchdog
+cannot hit this.
+
+**Resolved 2026-09-27 (plist `v3`).** `Program` is now `/bin/sh`, with the real
+command as its arguments:
+
+```xml
+<string>/bin/sh</string><string>-c</string><string>exec "$0" "$@"</string>
+<string><the front door></string><string>watch</string><string>tick</string>
+```
+
+The pinned identity is therefore an OS binary that never changes, whatever the
+`$0` beside it becomes — so the port may point this at `rowt-rs` later without
+inheriting the hazard. `com.alibaba.ncs.upgrade` on this Mac already runs this
+exact shape with `has LWCR` attached, so it is a tested arrangement, not a
+guess. Existing agents carry the older marker and are rewritten by the next
+tick's self-repair.
+
+`$0` is the **front door**, never whichever binary wrote the file:
+`_watch_self` in the shell (`command -v rowt`, else the `bin/rowt` beside it),
+mirrored by `watch_self()` in `crates/rowt-cli/src/main.rs`, which `bin/rowt`
+also hands down as `ROWT_SELF` when it delegates.
+
+And the plist is now **compared**: `snapshot_fs` walks
+`~/Library/LaunchAgents` as well as the config tree — the same blind spot the
+rc files needed explicit handling for. Turning that gate on immediately found
+two divergences that had been invisible: `rowt-rs` omitted the five
+`ROWT_PPROF`/`ROWT_CPU_SPIN_*` knobs from the agent's environment, and wrote
+`SINGBOX_VERSION` only when it was exported, where `bin/rowt` defaults it into
+its own shell variable and so always writes the pin.
+
 ## 3. Why Rust (and not Go, and not modular bash)
 
 - **Rust**: the repo already carries 4.3k lines of it with a working test

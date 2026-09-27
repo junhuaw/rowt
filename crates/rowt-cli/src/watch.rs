@@ -22,7 +22,7 @@ pub const LABEL: &str = "club.annaslife.rowt.watch";
 /// older rowt is recognised as stale and re-synced. A marker beats diffing the
 /// body, which legitimately varies with the installing shell's ROWT_* env.
 ///   v2 = adds AbandonProcessGroup.
-pub const PLIST_MARK: &str = "rowt-watch-plist v2";
+pub const PLIST_MARK: &str = "rowt-watch-plist v3";
 
 /// Was the installed agent written by an older rowt (different plist shape)?
 pub fn plist_stale(plist: &Path) -> bool {
@@ -158,8 +158,23 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
               // you hand-edited the plist.
               "ROWT_CAPTIVE_CHECK", "ROWT_CAPTIVE_URL", "ROWT_CAPTIVE_TIMEOUT", "ROWT_CAPTIVE_RETRY",
               "ROWT_CAPTIVE_FALLBACK",
-              "ROWT_WATCH_SHADOW", "ROWT_RENDER_SHADOW"] {
-        if let Ok(val) = std::env::var(v) {
+              "ROWT_WATCH_SHADOW", "ROWT_RENDER_SHADOW",
+              // The spin knobs. Missing here until 2026-09-27 (#51): a
+              // bash-written plist passed them to the agent and a rowt-rs one
+              // did not, so tuning the spin detector had no effect on the
+              // watchdog that actually acts on it. Nothing compared the plist,
+              // so nothing said so.
+              "ROWT_PPROF", "ROWT_CPU_SPIN_PCT", "ROWT_CPU_SPIN_BYTES",
+              "ROWT_CPU_SPIN_TICKS", "ROWT_CPU_HEAL_COOLDOWN"] {
+        // bin/rowt defaults SINGBOX_VERSION into its own shell variable, so the
+        // plist ALWAYS carries the pin; reading only the environment left it
+        // out whenever the user had not exported one.
+        let val = if v == "SINGBOX_VERSION" {
+            Some(crate::fetch::pinned_version())
+        } else {
+            std::env::var(v).ok()
+        };
+        if let Some(val) = val {
             if !val.is_empty() {
                 envxml.push_str(&format!("\n    <key>{v}</key><string>{val}</string>"));
             }
@@ -173,8 +188,17 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
      The marker is how a tick spots an agent written by an older rowt and re-syncs it. -->
 <dict>
   <key>Label</key><string>{LABEL}</string>
+  <!-- Program is /bin/sh, not rowt itself. Background Task Management pins the
+       program's CODE-SIGNING IDENTITY at login (an LWCR); when that identity
+       stops matching, launchd refuses the job with EX_CONFIG and logs nothing.
+       /bin/sh is a platform binary whose identity never moves, so the agent
+       survives any rowt upgrade — including a future where this Program would
+       otherwise be the ad-hoc-signed rowt-rs. PORTING.md §2.1. -->
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec "$0" "$@"</string>
     <string>{}</string>
     <string>watch</string>
     <string>tick</string>
@@ -332,6 +356,33 @@ fn probe_args<'a>(url: &'a str, timeout: &'a str, resolve: Option<&'a str>) -> V
     args
 }
 
+/// Follow the hop ONCE, unproxied, on the same budget and the same `--resolve`
+/// pin as the probe — the hop is on the probe's host, which is exactly the name
+/// that pin was for. Not `-L`: one request, and the portal names itself in this
+/// response's redirect. Advisory only; what gets OPENED is still the probe URL.
+///
+/// Nothing from the answer is logged but the HOST: the hop's query carries the
+/// client's MAC, IP and SSID, and `arubalp` is a session token.
+/// `_captive_follow_hop`.
+fn follow_hop(log: &Path, hop: &str, timeout: &str, resolve: Option<&str>) -> Option<String> {
+    let args = probe_args(hop, timeout, resolve);
+    let o = Command::new("curl").args(&args).stderr(Stdio::null()).output().ok()?;
+    if !o.status.success() {
+        let rc = o.status.code().unwrap_or(-1);
+        // The query is the session token and the client's identifiers; the log
+        // keeps the address. Same `split('?')` the announce uses.
+        let bare = hop.split('?').next().unwrap_or(hop);
+        captive_log(log, &format!("hop       {} (rc={rc}) url={bare}", curl_why(rc)));
+        return None;
+    }
+    let out = String::from_utf8_lossy(&o.stdout);
+    let (_code, redir) = split_probe(&out);
+    let ph = url_host(hop)?;
+    url_host(&redir)
+        .filter(|h| *h != ph)
+        .or_else(|| body_url(probe_payload(&out), Some(&ph)).and_then(|u| url_host(&u)))
+}
+
 /// One probe. `resolve` is curl's `host:port:ip`, placed right before `-w`.
 fn probe_once(log: &Path, label: &str, url: &str, timeout: &str, resolve: Option<&str>) -> (CaptiveState, Option<String>, Option<String>) {
     let args = probe_args(url, timeout, resolve);
@@ -348,11 +399,18 @@ fn probe_once(log: &Path, label: &str, url: &str, timeout: &str, resolve: Option
         captive_log(log, &format!("unknown   {label}: {} (rc={rc}) url={url}{rsv}", curl_why(rc)));
         return (CaptiveState::Unknown, None, None);
     }
-    let v = probe_verdict(&String::from_utf8_lossy(&o.stdout), url);
+    let out = String::from_utf8_lossy(&o.stdout);
+    let mut v = probe_verdict(&out, url);
+    // Still nothing: the body may only carry the portal's own redirect hop.
+    if v.0 == CaptiveState::Captive && v.2.is_none() {
+        if let Some(hop) = url_host(url).and_then(|ph| body_hop(probe_payload(&out), &ph, url)) {
+            v.2 = follow_hop(log, &hop, timeout, resolve);
+        }
+    }
     // A clear verdict needs no explaining; everything else is what a later
     // reader is trying to account for.
     if v.0 != CaptiveState::Clear {
-        let (code, _) = split_probe(&String::from_utf8_lossy(&o.stdout));
+        let (code, _) = split_probe(&out);
         let portal = v.2.as_ref().map(|h| format!(" portal={h}")).unwrap_or_default();
         captive_log(log, &format!("{}   {label}: HTTP {code} url={url}{rsv}{portal}", v.0.as_str()));
     }
@@ -525,6 +583,44 @@ fn body_url(body: &str, skip: Option<&str>) -> Option<String> {
         rest = &rest[end.max(scheme)..];
     }
     None
+}
+
+/// The portal's redirect HOP: the first body URL that points back AT the probe
+/// host and carries a query. Aruba ClearPass/Instant answers the probe 200 with
+/// a refresh to `…?cmd=redirect&arubalp=<n>` on the probe's OWN host and only
+/// names itself on the hop after that, so `body_url` — which skips the probe
+/// host, rightly — finds nothing. The query is what tells a hop from a plain
+/// self-reference, and it must differ from the probe URL itself so a
+/// `ROWT_CAPTIVE_URL` that already carries one cannot re-fetch itself.
+/// `&amp;` is decoded because that is what a browser sends. `_captive_body_hop`.
+fn body_hop(body: &str, host: &str, selfurl: &str) -> Option<String> {
+    let body = body.replace('\r', "");
+    let mut rest = body.as_str();
+    while let Some(i) = rest.find("http") {
+        rest = &rest[i..];
+        let scheme = if rest.starts_with("https://") { 8 } else if rest.starts_with("http://") { 7 } else { rest = &rest[4..]; continue };
+        let end = rest[scheme..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+            .map(|n| scheme + n)
+            .unwrap_or(rest.len());
+        let candidate = &rest[..end];
+        if url_host(candidate).as_deref() == Some(host) && candidate.contains('?') && candidate != selfurl {
+            return Some(candidate.replace("&amp;", "&"));
+        }
+        rest = &rest[end.max(scheme)..];
+    }
+    None
+}
+
+/// The probe's payload — stdout minus the `-w` code and redirect lines, which
+/// is what the shell's `$body` holds. `body_url` is deliberately still handed
+/// the whole of stdout, as it always was; `body_hop` matches only the probe's
+/// own host, so feeding it the `redirect=` line would find a hop the shell
+/// never sees.
+fn probe_payload(out: &str) -> &str {
+    let p = out.trim_end_matches('\n');
+    let p = p.rsplit_once('\n').map(|(r, _)| r).unwrap_or(p);
+    p.rsplit_once('\n').map(|(r, _)| r).unwrap_or(p)
 }
 
 /// `net_id` — a signature for "which network am I on", so a home→hotspot move
@@ -1180,6 +1276,14 @@ mod tests {
             ["-s", "--noproxy", "*", "--max-time", "6", "--resolve", "captive.apple.com:80:203.0.113.5",
              "-w", PROBE_W, "http://captive.apple.com/x"]
         );
+        // The hop rides the SAME pin and the same budget — it is on the probe's
+        // own host, which is exactly the name that pin was taken out for.
+        let hop = "http://captive.apple.com/x?cmd=redirect&arubalp=7";
+        assert_eq!(
+            probe_args(hop, "6", Some("captive.apple.com:80:203.0.113.5")),
+            ["-s", "--noproxy", "*", "--max-time", "6", "--resolve", "captive.apple.com:80:203.0.113.5",
+             "-w", PROBE_W, hop]
+        );
     }
 
     /// The DNS-free fallback's rule, which is deliberately stricter than the
@@ -1242,6 +1346,48 @@ mod tests {
         assert_eq!(body_url("x http://h.example/a\" y", None).as_deref(), Some("http://h.example/a"));
     }
 
+    /// SFO, 2026-09-27: the probe came back 200 with a body whose ONLY URL was
+    /// a refresh back to the probe's own host carrying `?cmd=redirect&arubalp=`.
+    /// `body_url` skips the probe host, so nothing was named and the host had to
+    /// be dug out of browser history — which is the thing the feature exists to
+    /// prevent. The query is what tells a hop from a self-reference.
+    #[test]
+    fn a_portal_that_redirects_via_the_probe_host_is_still_a_hop() {
+        let probe = "http://captive.apple.com/hotspot-detect.html";
+        let hop = "http://captive.apple.com/hotspot-detect.html?cmd=redirect&arubalp=7";
+        let body = |u: &str| format!("<META http-equiv=\"refresh\" content=\"0;url={u}\">");
+
+        assert_eq!(body_hop(&body(hop), "captive.apple.com", probe).as_deref(), Some(hop));
+        // A bare self-reference is not a hop — following it would re-probe.
+        assert_eq!(body_hop(&body(probe), "captive.apple.com", probe), None);
+        // Nor is the probe URL itself, when ROWT_CAPTIVE_URL already has a query.
+        assert_eq!(body_hop(&body(hop), "captive.apple.com", hop), None);
+        // A foreign host is body_url's job, not this one's.
+        assert_eq!(body_hop("x http://portal.example/login?a=1 y", "captive.apple.com", probe), None);
+        // Why probe_payload exists: `-w` appends a `redirect=` line, and it is
+        // on the probe's host too. Matched against raw stdout it reads as a hop
+        // the shell — whose `$body` never holds those lines — would never see.
+        let raw = format!("x\n302\nredirect={hop}");
+        assert!(body_hop(&raw, "captive.apple.com", probe).is_some(), "raw stdout wrongly yields a hop");
+        assert_eq!(body_hop(probe_payload(&raw), "captive.apple.com", probe), None);
+        // `&amp;` is what an HTML attribute actually carries; the portal reads
+        // these as real parameters, so it is decoded exactly as a browser would.
+        let amp = "http://captive.apple.com/h?cmd=redirect&amp;arubalp=7";
+        assert_eq!(body_hop(&body(amp), "captive.apple.com", probe).as_deref(),
+                   Some("http://captive.apple.com/h?cmd=redirect&arubalp=7"));
+    }
+
+    /// The hop is matched against the probe's own host, so it must not be shown
+    /// the `redirect=` line that `-w` appends — the shell's `$body` never has it.
+    #[test]
+    fn the_probe_payload_drops_the_two_w_lines() {
+        assert_eq!(probe_payload("<html>hi</html>\n200\nredirect="), "<html>hi</html>");
+        assert_eq!(probe_payload("a\nb\n302\nredirect=http://x.example/"), "a\nb");
+        // A body of its own with no -w lines is left alone rather than emptied.
+        assert_eq!(probe_payload("just-a-line"), "just-a-line");
+    }
+
+    #[test]
     fn the_dns_free_fallback_acts_only_on_a_redirect() {
         let v = |body: &str| {
             let (code, redir) = split_probe(body);
@@ -1326,6 +1472,30 @@ mod tests {
     /// it launchd SIGKILLs the tick's whole process group when the tick exits,
     /// which kills the sing-box a reload just started — the router silently
     /// going down on a network switch.
+    /// `plist_stale` is the ONLY path that reaches an agent already on disk:
+    /// the formula's post_install `watch refresh` never rewrites the plist under
+    /// brew, so a tick noticing its own marker is out of date is the whole
+    /// delivery mechanism. The v2 -> v3 bump that moved Program to /bin/sh is
+    /// delivered by exactly this returning true — and it had no test at all.
+    #[test]
+    fn an_agent_from_an_older_rowt_reads_stale_and_the_current_one_does_not() {
+        let dir = std::env::temp_dir().join(format!("rowt-plist-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("agent.plist");
+
+        let ctx = Ctx::new(std::path::PathBuf::from("/tmp/rowt-test-cfg"));
+        std::fs::write(&p, plist_body(&ctx, Path::new("/opt/homebrew/bin/rowt"))).unwrap();
+        assert!(!plist_stale(&p), "what this rowt just wrote must not read stale");
+
+        std::fs::write(&p, "<!-- rowt-watch-plist v2 --><plist/>").unwrap();
+        assert!(plist_stale(&p), "an older marker must read stale, or nobody gets the fix");
+
+        // Nothing on disk is not stale — there is no agent to re-sync.
+        std::fs::remove_file(&p).unwrap();
+        assert!(!plist_stale(&p));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
     #[test]
     fn the_launch_agent_abandons_the_process_group_it_starts() {
         let ctx = Ctx::new(std::path::PathBuf::from("/tmp/rowt-test-cfg"));
@@ -1336,10 +1506,15 @@ mod tests {
         assert!(body.contains("/etc/resolv.conf"));
         assert!(body.contains("/var/run/resolv.conf"));
         assert!(body.contains("<key>StartInterval</key>"));
-        // It must invoke `watch tick`, not `watch`, and name the binary it was
-        // installed from rather than whatever `rowt` resolves to later.
+        // It must invoke `watch tick`, not `watch`, and name the front door it
+        // was installed from.
         assert!(body.contains("<string>/opt/homebrew/bin/rowt</string>"));
         assert!(body.contains("<string>watch</string>\n    <string>tick</string>"));
+        // Program is /bin/sh with rowt as $0, so the LWCR launchd attaches at
+        // login pins an OS binary that never changes rather than rowt's own
+        // file, which every upgrade replaces. PORTING.md §2.1.
+        assert!(body.contains("<string>/bin/sh</string>\n    <string>-c</string>"));
+        assert!(body.contains(r#"<string>exec "$0" "$@"</string>"#));
         assert!(body.contains(&format!("<key>Label</key><string>{LABEL}</string>")));
         // Both streams land in watch.log, which is where a recovery's story is.
         assert!(body.contains("/tmp/rowt-test-cfg/log/watch.log"));
