@@ -3,9 +3,11 @@
 //!   rowt-explain --config-dir DIR <dest>
 //!   rowt-explain --config-dir DIR --corpus FILE     # one verdict per line, TSV
 //!
-//! Output matches the first two lines of `rowt explain`. The optional note and
-//! live-probe lines the shell adds are not reproduced: the first depends on
-//! which rule-sets happen to be cached, the second dials the network.
+//! Output matches the first two lines of `rowt explain`. The note and live-probe
+//! lines the shell adds are not reproduced: the geosite note depends on which
+//! rule-sets happen to be cached and the probe dials the network. (The
+//! address note — `Classification::note` — is deterministic, and `cli-diff`
+//! compares it as part of whole-stdout for the explain cases.)
 //!
 //! No DNS resolution happens here — that is a platform call. Pass `--ip` when
 //! the caller already has an answer.
@@ -70,6 +72,8 @@ fn run() -> Result<String, String> {
         final_route,
         local_mode: mode == "local",
         resolved_ip: &ip,
+        // `basename $0` in the shell, and this gate always drives bin/rowt.
+        prog: "rowt",
     };
 
     if let Some(path) = corpus {

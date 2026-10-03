@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.19"
+ROWT_VERSION="3.5.20"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4398,6 +4398,30 @@ _longest_domain_hit() { # $1=domain
   printf '%s suffix %s\n' "$best_lane" "$best_e"
 }
 
+# Is this name on the OS proxy BYPASS list (the hotspot lane)? Longest match,
+# with the same label-boundary test as _longest_domain_hit (macOS is handed both
+# `x.com` and `*.x.com`, which is bare-entry semantics). CIDR entries are
+# skipped: they bypass too, but by address, and this answers about a name.
+#
+# Not a routing lane, so a hit here does not compete with the lanes — it means
+# the OS never hands rowt the connection at all.
+_hotspot_hit() { # $1=domain
+  local val="$1" best="" e
+  [ -f "$HOTSPOT_DOMAINS" ] || return 1
+  while IFS= read -r e; do
+    e="$(printf '%s' "$e" | sed 's/[[:space:]]//g')"; case "$e" in ''|\#*) continue ;; esac
+    case "$e" in '*.'?*) e="${e#\*}" ;; esac
+    case "$e" in domain:*) e="${e#domain:}"; [ -n "$e" ] && [ "$val" = "$e" ] && { printf '%s\n' "$e"; return 0; }; continue ;; esac
+    case "$e" in */[0-9]*) continue ;; esac
+    case "$e" in
+      .*) case "$val" in *"$e") [ "${#e}" -gt "${#best}" ] && best="$e" ;; esac ;;
+      *)  case "$val" in "$e"|*".$e") [ "${#e}" -gt "${#best}" ] && best="$e" ;; esac ;;
+    esac
+  done < "$HOTSPOT_DOMAINS"
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
 # Explain which lane a destination takes. Mirrors the render exactly: hand-list
 # domain suffixes win by LONGEST match across all three lanes (block/corp/escape),
 # then corp ip_cidr (on the resolved IP), then final. (The geosite ad rule-set
@@ -4406,7 +4430,24 @@ _longest_domain_hit() { # $1=domain
 cmd_explain() {
   local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
   dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
-  local lane="" why="" ip="" m hit
+  local lane="" why="" ip="" ip_note="" m hit
+  # The hotspot lane is not a routing lane: macOS takes these names off the
+  # proxy before rowt is handed the connection, so no lane applies and a probe
+  # THROUGH the router would say nothing about them. Answered first for that
+  # reason, and its probe goes direct — which is what the OS does.
+  if ! is_ipv4 "$dest" && m="$(_hotspot_hit "$dest")"; then
+    printf '%s  ->  BYPASS   (hotspot lane — macOS keeps it off the proxy; the OS resolver answers it)\n' "$dest"
+    echo "  matched: hotspot-domains entry '$m' — on the OS proxy bypass list, so rowt is not in the path"
+    # No -x here, so --noproxy '*' is the point rather than the mistake it
+    # would be alongside one: the path worth probing is the OS's.
+    local hcode; hcode="$(curl -sS -m 8 --noproxy '*' -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; hcode="${hcode:-000}"
+    if [ "$hcode" = 000 ]; then
+      echo "  live:    NOT reachable bypassing the proxy — no response"
+    else
+      echo "  live:    reachable bypassing the proxy — origin answered HTTP $hcode for https://$dest/ (the site root; not a verdict on the lane)"
+    fi
+    return 0
+  fi
   if is_ipv4 "$dest"; then
     ip="$dest"
     if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
@@ -4419,10 +4460,23 @@ cmd_explain() {
       *)     why="longest-match ${lane}-domains suffix '$m'" ;;
     esac
   else
+    # A NAME is classified by its domain, BEFORE anything is resolved: the route
+    # rules the renderer emits match the sniffed domain, and the ip_cidr rules
+    # (corp CIDRs, the private/overlay default) only ever see an address you
+    # dial directly. So an unlisted name takes the final route however its A
+    # record looks — proven 2026-10-02: a name resolving into 100.64/10 was
+    # dialled bound to en0 out of lane-direct. This used to report CORP for it,
+    # which was wrong on exactly the names that are broken.
     ip="$(resolve_ip "$dest")"
-    if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then lane=corp; why="resolves to $ip — in corp CIDR '$m'"
-    elif [ -n "$ip" ] && m="$(_private_hit "$ip")"; then lane=corp; why="resolves to $ip — private/overlay range '$m' (unbound, OS routing)"
-    else lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"; fi
+    lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"
+    if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then
+      ip_note="resolves to $ip, inside corp CIDR '$m' — but that rule only matches an IP you dial directly, so the NAME still goes $FINAL_ROUTE ('$PROG corp add <suffix>' corp-routes the name)"
+    elif [ -n "$ip" ] && m="$(_private_hit "$ip")"; then
+      case "$m" in
+        100.64.0.0/10) ip_note="resolves to $ip, an overlay address in '$m' — the name still goes $FINAL_ROUTE, and an overlay zone usually answers only at the OS resolver ('$PROG hotspot add <suffix>' hands it to the OS, which is the only resolver that can)" ;;
+        *)             ip_note="resolves to $ip, private/overlay range '$m' — but that rule only matches an IP you dial directly, so the NAME still goes $FINAL_ROUTE ('$PROG corp add <suffix>' corp-routes the name)" ;;
+      esac
+    fi
   fi
   local xmode; xmode="$(sget mode)"; xmode="${xmode:-host}"
   if [ "$xmode" = "local" ] && [ "$lane" = "escape" ]; then
@@ -4437,6 +4491,7 @@ cmd_explain() {
   esac
   printf '%s%s  ->  %s   (%s)\n' "$dest" "${ip:+ ($ip)}" "$(printf '%s' "$lane" | tr 'a-z' 'A-Z')" "$desc"
   echo "  matched: $why"
+  if [ -n "$ip_note" ]; then echo "  note:    $ip_note"; fi
   # Opaque binary rule-sets (the ad-block set, and any `geosite:<name>` a lane
   # pulls) can't be inspected here, so they may route/block this beyond what the
   # hand lists show.

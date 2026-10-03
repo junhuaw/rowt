@@ -61,6 +61,8 @@ pub struct ClassifyInput<'a> {
     pub local_mode: bool,
     /// A resolved address for a name, when the caller has one. Empty otherwise.
     pub resolved_ip: &'a str,
+    /// `$PROG` — the name the advice in a `note` tells the user to run.
+    pub prog: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,10 @@ pub struct Classification {
     pub ip: String,
     pub lane: Lane,
     pub why: String,
+    /// `explain`'s extra `note:` line about the resolved address: why an A
+    /// record inside a corp CIDR or a private range did NOT change the lane.
+    /// Empty whenever there is nothing to say.
+    pub note: String,
 }
 
 impl Classification {
@@ -255,6 +261,33 @@ pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str) -> 
         .or_else(|| best.map(|(l, e)| (l, HitKind::Suffix, e)))
 }
 
+/// `_hotspot_hit` — is this name on the OS proxy BYPASS list?
+///
+/// The hotspot lane is not a routing lane: macOS takes these names off the
+/// proxy before rowt is ever handed the connection, so a hit here short-circuits
+/// every lane question rather than competing with it. Longest match, with the
+/// same label-boundary test as `longest_domain_hit` (macOS is given both
+/// `x.com` and `*.x.com`, which is bare-entry semantics). CIDR entries are
+/// skipped: they bypass too, but by address, and this answers about a name.
+pub fn bypass_hit(dest: &str, hotspot: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    for e in entries(hotspot) {
+        if let Some(host) = e.strip_prefix(crate::render::EXACT_PREFIX) {
+            if !host.is_empty() && dest == host {
+                return Some(host.to_string());
+            }
+            continue;
+        }
+        if looks_like_cidr(&e) || !suffix_matches(dest, &e) {
+            continue;
+        }
+        if best.as_ref().map(|b| e.len() > b.len()).unwrap_or(true) {
+            best = Some(e);
+        }
+    }
+    best
+}
+
 /// Would this destination reach the branch that needs a DNS answer?
 ///
 /// The shell resolves lazily — `resolve_ip` runs only in the `else` after both
@@ -271,6 +304,7 @@ pub fn needs_resolution(raw_dest: &str, escape: &str, corp: &str, block: &str) -
 pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
     let dest = normalize_dest(raw_dest);
     let mut ip = String::new();
+    let mut note = String::new();
     let (mut lane, mut why);
 
     if is_ipv4(&dest) {
@@ -295,27 +329,35 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
             HitKind::Suffix => format!("longest-match {}-domains suffix '{m}'", l.as_str()),
         };
     } else {
+        // A NAME is classified by its domain, BEFORE anything is resolved: the
+        // route rules the renderer emits match the sniffed domain, and the
+        // ip_cidr rules (corp CIDRs, the private/overlay default) only ever see
+        // an address dialled directly. So an unlisted name takes the final
+        // route however its A record looks — measured 2026-10-02, when a name
+        // resolving into 100.64/10 was dialled bound to en0 out of lane-direct.
+        // This used to answer CORP for such a name, which was wrong on exactly
+        // the names that are broken; the address now goes in a `note` instead.
         ip = i.resolved_ip.to_string();
+        lane = i.final_route;
+        why = format!(
+            "no block/corp/escape rule; final route = {}",
+            i.final_route.as_str()
+        );
+        let fr = i.final_route.as_str();
         if !ip.is_empty() {
             if let Some(m) = cidr_hit(&ip, i.corp_list) {
-                lane = Lane::Corp;
-                why = format!("resolves to {ip} — in corp CIDR '{m}'");
+                note = format!("resolves to {ip}, inside corp CIDR '{m}' — but that rule only matches an IP you dial directly, so the NAME still goes {fr} ('{} corp add <suffix>' corp-routes the name)", i.prog);
             } else if let Some(m) = private_hit(&ip, i.private_cidrs, i.private_default) {
-                lane = Lane::Corp;
-                why = format!("resolves to {ip} — private/overlay range '{m}' (unbound, OS routing)");
-            } else {
-                lane = i.final_route;
-                why = format!(
-                    "no block/corp/escape rule; final route = {}",
-                    i.final_route.as_str()
-                );
+                note = if m == "100.64.0.0/10" {
+                    // The overlay case, and the one that matters: a zone served
+                    // only by an overlay resolver answers for the OS and for
+                    // nothing rowt can point a lane at (sing-box's `local` is
+                    // /etc/resolv.conf, which carries the primary resolver only).
+                    format!("resolves to {ip}, an overlay address in '{m}' — the name still goes {fr}, and an overlay zone usually answers only at the OS resolver ('{} hotspot add <suffix>' hands it to the OS, which is the only resolver that can)", i.prog)
+                } else {
+                    format!("resolves to {ip}, private/overlay range '{m}' — but that rule only matches an IP you dial directly, so the NAME still goes {fr} ('{} corp add <suffix>' corp-routes the name)", i.prog)
+                };
             }
-        } else {
-            lane = i.final_route;
-            why = format!(
-                "no block/corp/escape rule; final route = {}",
-                i.final_route.as_str()
-            );
         }
     }
 
@@ -324,7 +366,7 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
         why = format!("{why} — local mode: the escape lane routes direct");
     }
 
-    Classification { dest, ip, lane, why }
+    Classification { dest, ip, lane, why, note }
 }
 
 #[cfg(test)]
@@ -341,6 +383,7 @@ mod tests {
             final_route: Lane::Direct,
             local_mode: false,
             resolved_ip: "",
+            prog: "rowt",
         }
     }
 

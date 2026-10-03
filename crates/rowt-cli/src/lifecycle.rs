@@ -796,6 +796,21 @@ pub fn curl_code(proxy: &str, url: &str) -> String {
     }
 }
 
+/// `curl -sS -m 8 --noproxy '*' …` — the same probe with the proxy left OUT.
+///
+/// For a hotspot-lane name, which the OS keeps off the proxy: the path worth
+/// probing is the one the OS takes, so here `--noproxy` is the point rather
+/// than the mistake it would be alongside `-x`.
+pub fn curl_code_direct(url: &str) -> String {
+    let out = Command::new("curl")
+        .args(["-sS", "-m", "8", "--noproxy", "*", "-o", "/dev/null", "-w", "%{http_code}", url])
+        .stderr(Stdio::null()).output();
+    match out {
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => "000".into(),
+    }
+}
+
 /// `tail -8 "$HOST_LOG" >&2` — the last thing sing-box said before it gave up.
 ///
 /// Spelled as the external command the shell runs, not read in-process: the

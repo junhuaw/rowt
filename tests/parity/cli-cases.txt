@@ -124,6 +124,11 @@ PARITY_SCENARIO=wildcard-lane corp rm .corp.example
 PARITY_SCENARIO=wildcard-lane corp add .wild.example
 PARITY_SCENARIO=wildcard-lane escape add *.wild.example
 PARITY_SCENARIO=wildcard-lane hotspot list
+# A name on the OS bypass list: the hotspot lane is not a routing lane, so the
+# verdict is BYPASS and the live probe goes AROUND the proxy — rowt is not in
+# that path at all. Both the suffix and the `domain:` spelling.
+PARITY_SCENARIO=hotspot-lane explain host.portal.example
+PARITY_SCENARIO=hotspot-lane explain login.hotspot.example
 PARITY_SCENARIO=wildcard-lane proxy env
 PARITY_SCENARIO=wildcard-lane proxy on --force
 PARITY_SCENARIO=wildcard-lane config export --to shadowrocket --routes-only -

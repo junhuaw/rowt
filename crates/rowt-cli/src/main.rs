@@ -493,6 +493,27 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
     let ctx = Ctx::new(cfg.to_path_buf());
     let lanes = load_lanes(cfg);
     let mode = ctx.mode();
+    // The hotspot lane is not a routing lane: macOS takes these names off the
+    // proxy before rowt is handed the connection, so no lane applies and a
+    // probe THROUGH the router would say nothing about them. Answered first for
+    // that reason, and its probe goes direct — which is what the OS does.
+    let nd = rowt_core::classify::normalize_dest(dest);
+    if !rowt_core::classify::is_ipv4(&nd) {
+        if let Some(m) = rowt_core::classify::bypass_hit(&nd, &lanes.hotspot) {
+            let mut out = format!(
+                "{nd}  ->  BYPASS   (hotspot lane — macOS keeps it off the proxy; the OS resolver answers it)\n  matched: hotspot-domains entry '{m}' — on the OS proxy bypass list, so rowt is not in the path"
+            );
+            // No `-x` here, so `--noproxy '*'` is right rather than wrong: the
+            // question is whether the path the OS actually takes works.
+            let code = lifecycle::curl_code_direct(&format!("https://{nd}/"));
+            if code == "000" {
+                out.push_str("\n  live:    NOT reachable bypassing the proxy — no response");
+            } else {
+                out.push_str(&format!("\n  live:    reachable bypassing the proxy — origin answered HTTP {code} for https://{nd}/ (the site root; not a verdict on the lane)"));
+            }
+            return out;
+        }
+    }
     let private: Vec<String> =
         ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
             .iter().map(|s| s.to_string()).collect();
@@ -507,9 +528,12 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
     let c = classify(dest, &ClassifyInput {
         escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block,
         private_cidrs: &private, private_default: &pd, final_route,
-        local_mode: mode == "local", resolved_ip: &ip,
+        local_mode: mode == "local", resolved_ip: &ip, prog: PROG,
     });
     let mut out = c.render();
+    if !c.note.is_empty() {
+        out.push_str(&format!("\n  note:    {}", c.note));
+    }
 
     // The shell warns that opaque rule-sets may still match, whenever the ad set
     // is cached or any lane names a geosite: category. Not shown for `block`,
