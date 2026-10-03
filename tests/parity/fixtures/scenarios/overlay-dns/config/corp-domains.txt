@@ -1,0 +1,7 @@
+# Synthetic parity fixture — documentation ranges (RFC 5737) only.
+# One of the overlay zones the scoped resolvers advertise is in this lane by
+# hand. The user's rule wins: `corp sync` must leave it here and say that the
+# zone cannot actually resolve in any lane, rather than moving it.
+corp.example
+ovl.corp.example
+198.51.100.0/24

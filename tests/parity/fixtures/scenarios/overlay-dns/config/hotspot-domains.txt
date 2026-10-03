@@ -1,0 +1,3 @@
+# Synthetic parity fixture — a hand-added bypass entry above the auto block, so
+# the head has to survive a sync verbatim.
+Portal.Example

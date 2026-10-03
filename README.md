@@ -352,6 +352,30 @@ restarting the router, and `corp sync` stops mirroring a venue's DHCP-advertised
 domain into the corp lane while it sits here. CLI tools ignore the macOS list;
 `rowt proxy env` and `rowt run` export the same entries as `no_proxy` for them.
 
+### Tailnet names (and any other scoped-only zone) — automatic
+
+A tailnet host (`laptop.tail1234.ts.net`) answers at **one** resolver: the
+overlay's own, at a CGNAT address like `100.100.100.100`, which macOS registers
+as a *scoped* resolver for that zone. Nothing else can answer it — not a public
+resolver, and not `/etc/resolv.conf`, which on macOS carries the primary resolver
+alone. That is also what sing-box's "system" resolver reads, so such a name fails
+in **every** lane, corp included: putting `ts.net` in the corp lane moves the
+verdict and changes nothing on the wire.
+
+So rowt does not route those zones — it hands them to the OS, which is the only
+thing on the Mac that consults the scoped-resolver table. `corp sync` (every
+watchdog tick) detects a zone served only from `100.64/10` and mirrors it into
+the hotspot lane's auto-managed block, so macOS keeps those names off the proxy
+and resolves them itself; the traffic then takes the overlay's own route, exactly
+as the unbound corp lane would have sent it. Nothing to configure, and
+`rowt explain laptop.tail1234.ts.net` says `BYPASS` rather than naming a lane.
+
+A zone you have deliberately put in escape, block or corp is left alone — your
+rule wins, and the sync tells you that the zone cannot actually resolve there.
+One CGNAT resolver alongside a public one is treated as somebody's intranet
+(split-horizon with public records), not an overlay, and stays a `corp suggest`
+candidate for you to decide.
+
 ## Three-way routing
 
 | bucket | list | where it goes | example |
@@ -731,7 +755,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `escape` / `corp` / `block` (no verb) | list the lane. |
-| `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`.x.com` or `*.x.com` = the `*.x.com` form alone; `--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
+| `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts — and overlay DNS zones — that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`.x.com` or `*.x.com` = the `*.x.com` form alone; `--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. `corp sync` also WRITES here, in its own auto-managed block: the DNS zones only an overlay resolver answers (a tailnet's, say), which no lane can resolve — see [Tailnet names](#tailnet-names-and-any-other-scoped-only-zone--automatic). See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
 | `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
 | `… add --force <d>…` | add an entry that is a **whole namespace**. Lane entries are suffixes, so `com` is every `.com` and `co.uk` is every `.co.uk`; both are declined unless you say `--force`. |

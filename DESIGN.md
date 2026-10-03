@@ -108,13 +108,25 @@ route:
   resolves it at the exit. So `google.com` is **not** looked up by Chinese DNS
   (no poisoning) nor by corp DNS (no leak of what you browse). This is why
   domain-based rules + sniffing matter.
-- **`corp` names → `local`.** `"local"` means sing-box uses the macOS system
-  resolver configuration, which — on the corp LAN or with the corp VPN up — is
-  corp DNS (from DHCP / the VPN). So intranet names resolve to intranet IPs, and
-  rule #1/#4 send them into the corp tunnel. Off corp, `local` is simply
-  whatever resolver the current network provides. (Avoid `/etc/resolver/<suffix>`
-  pins for corp suffixes: `getaddrinfo` honours them *over* this arrangement, and
-  a pin to a public resolver breaks internal-only zones for every app.)
+- **`corp` names → `local`.** `"local"` is sing-box's own resolver, and on macOS
+  that means **`/etc/resolv.conf` — the PRIMARY resolver alone**. On the corp LAN
+  or with the corp VPN up, the primary resolver *is* corp DNS (DHCP / the VPN put
+  it there), so intranet names resolve to intranet IPs and rule #1/#4 send them
+  into the corp tunnel. Off corp, `local` is whatever resolver the current
+  network provides.
+  **It is not the macOS resolver *configuration*.** macOS keeps a SCOPED resolver
+  per zone — `scutil --dns` shows one block per zone with its own nameservers —
+  and the only resolver on the machine that consults that table is mDNSResponder,
+  through `getaddrinfo`. sing-box never sees it. So a zone that answers ONLY at a
+  scoped resolver (the usual case: a tailnet's MagicDNS zone, served at a CGNAT
+  address) NXDOMAINs in the corp lane exactly as it does in direct — measured
+  2026-10-02, when `corp add ts.net` moved the lane and changed nothing:
+  `dig +short <host>.ts.net` (resolv.conf) answered nothing while
+  `dscacheutil -q host` (mDNSResponder) answered with the node's `100.x` address. Such a zone has
+  no working lane, which is why `corp sync` hands it to the OS instead — see
+  **§5**. (Avoid `/etc/resolver/<suffix>` pins for corp suffixes: `getaddrinfo`
+  honours them *over* this arrangement, and a pin to a public resolver breaks
+  internal-only zones for every app.)
 - **Everything else → `dns-direct`** (AliDNS `223.5.5.5` over **DoH**), and
   crucially the query is sent through the **`direct`** outbound, i.e. **over
   `en0`**. So Baidu is resolved by a Chinese resolver on your home line —
@@ -138,6 +150,16 @@ internal-only split-horizon zones. (This was the rowt < 3.1.1 bug: proxied
 corp names failed with `lookup …: SERVFAIL` in `host.log` while plain
 `ping`/`dig` — which use the system resolver — worked fine.)
 
+**A zone only a scoped resolver answers is not routed at all — it is bypassed.**
+Picking a lane for such a name picks which resolver fails: `escape` asks the VPS,
+`direct` asks AliDNS over DoH, `corp` asks `/etc/resolv.conf`'s primary, and none
+of the three is the scoped resolver that holds the zone. The one resolver on the
+machine that *can* answer is the OS's, so rowt puts those zones on the macOS
+proxy **bypass** list (the hotspot lane) and lets the OS resolve and route them.
+The traffic then follows the overlay's own route — which is what the unbound corp
+lane would have done anyway — and `rowt explain` reports it as `BYPASS`, because
+the router is not in that path. Detection and the auto-managed block are in §5.
+
 Net effect with corp ON: intranet lookups use corp DNS over the corp tunnel;
 your personal/Chinese lookups use AliDNS over your home line; escaped sites are
 resolved remotely by the VPS. Three worlds, no cross-contamination.
@@ -147,8 +169,8 @@ resolved remotely by the VPS. Three worlds, no cross-contamination.
 The corp lane would be tedious to maintain by hand — every employer has its own
 suffixes, and a VPN's routed ranges change under you. `rowt corp sync` (run
 automatically by the `watch` agent on every tick, and on demand) mirrors two
-live signals into the lane, so on a fresh machine the corp lane mostly
-configures itself:
+live signals into the lane — and a third into the proxy bypass — so on a fresh
+machine the corp lane mostly configures itself:
 
 - **DHCP search domains → corp domains.** A domain the physical NIC's network
   advertises (an office LAN's search domain) only resolves via the system's
@@ -164,6 +186,22 @@ configures itself:
   `sync-ifaces.txt` — default the corp VPN (auto-detected: the busiest
   non-Tailscale tunnel); add `tailscale` to reach tailnet hosts through the
   proxy too.
+- **Overlay DNS zones → the proxy bypass**, not a lane. A zone served only by a
+  resolver at a CGNAT address (`100.64/10`) — a tailnet's MagicDNS zone, or
+  whatever base domain a self-hosted control server was given — answers nowhere
+  rowt can point a lane (§4), so `corp sync` mirrors it into
+  `hotspot-domains.txt` under its own marker and macOS keeps those names off the
+  proxy. Same persist-union, and the same conflict rule the other way round: a
+  zone you have put in escape/block/corp stays there and the sync says that the
+  zone cannot resolve in any lane, rather than overruling you. Nothing is
+  rendered and nothing reloads — the hotspot lane is handed to `networksetup`,
+  so this costs one proxy-bypass write, and only when the set changes.
+  The test is *at least one* nameserver in `100.64/10` and **no** v4 nameserver
+  outside overlay/private space: one CGNAT address alongside a public resolver is
+  somebody's intranet (split-horizon with public records), which stays the
+  human's call. That is what keeps a corp VPN's own zones out of it —
+  `corp suggest` still lists them as candidates, and an overlay zone is now
+  marked there rather than suggested for `corp add`, which could never work.
 
 Two properties keep it cheap and safe, and three rules bound what it can grow
 into:

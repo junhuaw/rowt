@@ -34,6 +34,7 @@ pub fn main(argv: &[String]) -> ExitCode {
         "internal_domains": d.internal_domains,
         "physical_search": d.physical_search,
         "corp_nameservers": d.corp_nameservers,
+        "overlay_domains": d.overlay_domains,
     });
     println!("{}", serde_json::to_string_pretty(&v).unwrap());
     ExitCode::SUCCESS

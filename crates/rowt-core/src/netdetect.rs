@@ -28,28 +28,91 @@ const INTERNAL_NS: [(&str, u32); 8] = [
     ("6.0.0.0", 12),
 ];
 
-fn is_internal_ns(ip: &str) -> bool {
-    // IPv4 only, and strictly: `ipaddress.ip_address` rejects "1.2.3" and
-    // "1.2.3.4.5", where a permissive split would accept both.
+/// An OVERLAY resolver's range: the CGNAT addresses overlay VPNs hand out
+/// (Tailscale's MagicDNS at 100.100.100.100; Headscale's equivalent). A zone
+/// served only from here resolves NOWHERE else — not at a public resolver, and
+/// not through `/etc/resolv.conf`, which on macOS carries the PRIMARY resolver
+/// only and never the scoped ones. That is what makes such a zone safe to act
+/// on automatically, unlike the rest of `internal_domains`.
+const OVERLAY_NS: (&str, u32) = ("100.64.0.0", 10);
+
+/// The company such a zone's resolvers may keep. Anything else — a public
+/// resolver, or the 11/30/6 space a corporate cloud routes privately — means
+/// the zone is somebody's intranet, which stays a suggestion for the human.
+const OVERLAY_OK_NS: [(&str, u32); 5] = [
+    ("10.0.0.0", 8),
+    ("172.16.0.0", 12),
+    ("192.168.0.0", 16),
+    ("100.64.0.0", 10),
+    ("169.254.0.0", 16),
+];
+
+/// The address as a u32 if it is IPv4, else None. Strict, like
+/// `ipaddress.ip_address`: "1.2.3" and "1.2.3.4.5" are both rejected, where a
+/// permissive split would accept them.
+///
+/// IPv6 nameservers are ignored throughout this file (Tailscale advertises
+/// `fd7a:115c:a1e0::53` alongside its v4 one, and the v4 one carries the same
+/// signal), which keeps one address parser rather than two in each language.
+fn ns_v4(ip: &str) -> Option<u32> {
     let parts: Vec<&str> = ip.split('.').collect();
     if parts.len() != 4 {
-        return false;
+        return None;
     }
     let mut v: u32 = 0;
     for p in &parts {
         if p.is_empty() || p.len() > 3 || !p.chars().all(|c| c.is_ascii_digit()) {
-            return false;
+            return None;
         }
         match p.parse::<u32>() {
             Ok(o) if o <= 255 => v = (v << 8) | o,
-            _ => return false,
+            _ => return None,
         }
     }
-    INTERNAL_NS.iter().any(|(net, bits)| {
-        let n: u32 = net.split('.').fold(0, |a, o| (a << 8) | o.parse::<u32>().unwrap_or(0));
-        let mask: u32 = if *bits == 0 { 0 } else { u32::MAX << (32 - bits) };
-        (v & mask) == (n & mask)
-    })
+    Some(v)
+}
+
+fn in_net(v: u32, net: &str, bits: u32) -> bool {
+    let n: u32 = net.split('.').fold(0, |a, o| (a << 8) | o.parse::<u32>().unwrap_or(0));
+    let mask: u32 = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+    (v & mask) == (n & mask)
+}
+
+fn is_internal_ns(ip: &str) -> bool {
+    match ns_v4(ip) {
+        Some(v) => INTERNAL_NS.iter().any(|(net, bits)| in_net(v, net, *bits)),
+        None => false,
+    }
+}
+
+/// Is this resolver block an overlay resolver, served by nothing else?
+///
+/// At least one CGNAT nameserver, and no v4 nameserver outside overlay/private
+/// space. The first half is the signal; the second is what keeps a corp VPN's
+/// own zone (`dns.corp.example` -> `30.9.8.7`) out of it.
+fn overlay_block(ns: &[String]) -> bool {
+    let v4: Vec<u32> = ns.iter().filter_map(|x| ns_v4(x)).collect();
+    v4.iter().any(|v| in_net(*v, OVERLAY_NS.0, OVERLAY_NS.1))
+        && v4.iter().all(|v| OVERLAY_OK_NS.iter().any(|(n, b)| in_net(*v, n, *b)))
+}
+
+/// Noise for the overlay question — but NOT the Tailscale skip. `skip_domain`
+/// drops `*.ts.net` because corp-routing a tailnet zone is wrong; here those
+/// zones are exactly what is being looked for, and only `local` and the
+/// reverse-DNS zones are noise.
+fn skip_zone(d: &str) -> bool {
+    let d = d.to_ascii_lowercase();
+    d.is_empty() || d == "local" || d.ends_with(".arpa")
+}
+
+/// Drop a zone a broader one already covers. The consumer matches by suffix, so
+/// `ts.net` covers `tail1234.ts.net` — one entry instead of one per tailnet
+/// this machine has ever joined.
+fn collapse(doms: &[String]) -> Vec<String> {
+    doms.iter()
+        .filter(|d| !doms.iter().any(|o| o != *d && d.ends_with(&format!(".{o}"))))
+        .cloned()
+        .collect()
 }
 
 /// `local`, reverse-DNS zones and Tailscale MagicDNS are noise, not corp signal.
@@ -67,6 +130,7 @@ pub struct Detected {
     pub internal_domains: Vec<String>,
     pub physical_search: Vec<String>,
     pub corp_nameservers: Vec<String>,
+    pub overlay_domains: Vec<String>,
 }
 
 /// `if_index : 14 (en0)` — the parenthesised device, and whether it is `en\d+`.
@@ -142,6 +206,8 @@ pub fn parse(text: &str) -> Detected {
     // fixture is built to catch.
     let mut cur_search: Vec<String> = Vec::new();
     let mut cur_phys = false;
+    let mut cur_match: Vec<String> = Vec::new();
+    let mut cur_ns: Vec<String> = Vec::new();
 
     macro_rules! flush {
         () => {
@@ -149,6 +215,16 @@ pub fn parse(text: &str) -> Detected {
                 for d in &cur_search {
                     if !out.physical_search.contains(d) {
                         out.physical_search.push(d.clone());
+                    }
+                }
+            }
+            // A zone is only claimed as overlay-served on the evidence of its
+            // OWN resolver block, which is why this waits for the flush: the
+            // nameservers may be printed after the domain they serve.
+            if overlay_block(&cur_ns) {
+                for d in &cur_match {
+                    if !out.overlay_domains.contains(d) {
+                        out.overlay_domains.push(d.clone());
                     }
                 }
             }
@@ -161,6 +237,8 @@ pub fn parse(text: &str) -> Detected {
             flush!();
             cur_search.clear();
             cur_phys = false;
+            cur_match.clear();
+            cur_ns.clear();
             continue;
         }
         if let Some(dev) = parse_if_index(line) {
@@ -169,6 +247,12 @@ pub fn parse(text: &str) -> Detected {
         }
         if let Some((is_search, dom)) = parse_domain(line) {
             let dom = dom.to_ascii_lowercase();
+            // The overlay question asks about MATCH domains only: a search
+            // domain is a suffix the OS appends to short names, not a zone a
+            // resolver claims.
+            if !is_search && !skip_zone(&dom) {
+                cur_match.push(dom.clone());
+            }
             if !skip_domain(&dom) {
                 if !seen.contains(&dom) {
                     seen.push(dom.clone());
@@ -181,6 +265,7 @@ pub fn parse(text: &str) -> Detected {
             continue;
         }
         if let Some(ip) = parse_nameserver(line) {
+            cur_ns.push(ip.clone());
             if is_internal_ns(&ip) && !ns_seen.contains(&ip) {
                 ns_seen.push(ip.clone());
                 out.corp_nameservers.push(ip);
@@ -188,6 +273,7 @@ pub fn parse(text: &str) -> Detected {
         }
     }
     flush!();
+    out.overlay_domains = collapse(&out.overlay_domains);
     out
 }
 
@@ -229,6 +315,23 @@ resolver #11
   search domain[0] : tail1234.ts.net
   search domain[1] : hz.corp.example
   flags    : Request A records
+
+resolver #12
+  domain   : ts.net
+  nameserver[0] : 100.100.100.100
+  nameserver[1] : fd7a:115c:a1e0::53
+  flags    : Request A records
+
+resolver #13
+  domain   : tail1234.ts.net
+  nameserver[0] : 100.100.100.100
+  flags    : Request A records
+
+resolver #14
+  domain   : vpn-dns.corp.example
+  nameserver[0] : 30.9.8.7
+  nameserver[1] : 100.100.100.100
+  flags    : Request A records
 ";
 
     #[test]
@@ -241,9 +344,40 @@ resolver #11
     fn noise_zones_are_dropped_and_order_is_first_seen() {
         let d = parse(FIXTURE);
         assert_eq!(d.internal_domains,
-                   ["hz.corp.example", "corp.example", "vpn.corp.example"]);
+                   ["hz.corp.example", "corp.example", "vpn.corp.example",
+                    "ts.net", "vpn-dns.corp.example"]);
         // local, *.arpa, *.ts.net and anything containing "tailscale" are noise.
         assert!(!d.internal_domains.iter().any(|x| x.contains("tailscale")));
+    }
+
+    #[test]
+    fn a_zone_only_an_overlay_resolver_answers_is_singled_out() {
+        let d = parse(FIXTURE);
+        // resolver #13's tail1234.ts.net is covered by #12's ts.net, and the
+        // consumer matches by suffix, so only the broader zone is reported.
+        assert_eq!(d.overlay_domains, ["ts.net"]);
+    }
+
+    #[test]
+    fn a_resolver_that_also_names_a_corp_nameserver_is_not_an_overlay() {
+        // resolver #14 has a CGNAT nameserver AND 30.9.8.7. One overlay
+        // address does not make a zone overlay-only: this is somebody's
+        // intranet and its lane stays the human's call.
+        assert!(!parse(FIXTURE).overlay_domains.contains(&"vpn-dns.corp.example".to_string()));
+        assert!(!overlay_block(&["30.9.8.7".into(), "100.100.100.100".into()]));
+        assert!(overlay_block(&["100.100.100.100".into(), "fd7a:115c:a1e0::53".into()]));
+        // A private resolver with no overlay address is a corp VPN, not an overlay.
+        assert!(!overlay_block(&["10.0.0.53".into()]));
+        // And a block with no nameserver at all (scutil prints those) is not one.
+        assert!(!overlay_block(&[]));
+    }
+
+    #[test]
+    fn a_search_domain_is_never_an_overlay_zone() {
+        // resolver #11 lists tail1234.ts.net as a SEARCH domain — a suffix the
+        // OS appends to short names, not a zone that resolver claims.
+        let d = parse("resolver #1\n  search domain[0] : tail1234.ts.net\n  nameserver[0] : 100.100.100.100\n");
+        assert!(d.overlay_domains.is_empty());
     }
 
     #[test]
@@ -251,7 +385,8 @@ resolver #11
         let d = parse(FIXTURE);
         // 30.1.2.3 is globally ROUTABLE and still internal here — some corporate
         // clouds route 11/8 and 30/8 privately, which is why the list is a list.
-        assert_eq!(d.corp_nameservers, ["30.1.2.3", "10.0.0.53"]);
+        assert_eq!(d.corp_nameservers,
+                   ["30.1.2.3", "10.0.0.53", "100.100.100.100", "30.9.8.7"]);
         // 223.5.5.5 is public; fd00::/8 is v6 and out of scope.
     }
 

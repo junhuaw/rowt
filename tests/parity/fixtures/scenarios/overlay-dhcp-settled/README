@@ -1,0 +1,5 @@
+The state `overlay-dhcp-clash` settles into after ONE `corp sync` — both config
+files here are that run's output, byte for byte. A second sync on this state must
+be a no-op: no write to either file, no bypass refresh, no reload. That is the
+proof the two auto-mirrors cannot ping-pong a zone between the corp lane and the
+proxy bypass on every watchdog tick.

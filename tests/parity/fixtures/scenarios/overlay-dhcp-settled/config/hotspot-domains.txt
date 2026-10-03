@@ -1,0 +1,3 @@
+
+# --- rowt corp sync: overlay DNS zones (auto-managed, do not edit below) ---
+mesh.example

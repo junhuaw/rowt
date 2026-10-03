@@ -237,7 +237,15 @@ impl Platform for Mac {
     fn proxy_set_bypass(&self, service: &str, entries: &[String]) -> Result<(), String> {
         let mut args: Vec<&str> = vec!["-setproxybypassdomains", service];
         args.extend(entries.iter().map(|s| s.as_str()));
-        self.sudo_networksetup(false, &args)
+        // Passwordless FIRST. The watch sudoers rule covers
+        // -setproxybypassdomains, and `corp sync` reaches this from the
+        // watchdog, which has no terminal to be asked for a password on —
+        // `sudo -n` fails instantly there instead of prompting, and the
+        // interactive form is the fallback for a machine without the rule.
+        match self.sudo_networksetup(true, &args) {
+            Ok(()) => Ok(()),
+            Err(_) => self.sudo_networksetup(false, &args),
+        }
     }
 
     fn proxy_states_off(&self, service: &str, passwordless: bool) -> Result<(), String> {

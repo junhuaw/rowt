@@ -38,6 +38,21 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   refreshes the bypass list. If a portal page never loads, `watch.log` names the
   venue's host after an episode (`captive portal host: …`) along with the exact
   `hotspot add` command; failing that, ask for the blank tab's address bar.
+- **Tailnet / overlay DNS zones**: handled automatically, and not by a lane. A zone
+  served only by a resolver at a CGNAT address (Tailscale's MagicDNS at
+  `100.100.100.100`, or a self-hosted control server's) answers nowhere rowt can point
+  a lane: sing-box's "system" resolver is `/etc/resolv.conf`, which on macOS carries
+  the primary resolver alone, never the scoped per-zone table that only mDNSResponder
+  reads. So `corp sync` mirrors the zone into the hotspot lane's auto-managed block and
+  macOS keeps those names off the proxy, resolving and routing them itself (the traffic
+  takes the overlay's own route — what the unbound corp lane would have done). Check it
+  with `rowt explain <tailnet-host>`: `BYPASS` is healthy. A zone the user has put in
+  escape/block/corp is left alone and the sync says the zone cannot resolve there — so
+  if a tailnet name fails, look for a hand-added entry in a routing lane rather than
+  adding another. One case the bypass cannot reach: a client that hardwires
+  `-x 127.0.0.1:7890` and ignores `no_proxy` (e.g. `curl --proxy …`) still fails on such
+  a name, because it insists on the one path whose resolver has no answer — tell the
+  user to drop the explicit proxy flag for that host, not to add a lane.
 
 ## Servers
 

@@ -1,0 +1,17 @@
+An overlay resolver, Tailscale-shaped but vendor-neutral: a scoped resolver at a
+CGNAT address (100.64/10) serving zones nothing else can answer.
+
+The point of the scenario is that such a zone has no working lane. sing-box's
+`local` server is Go's resolver, which reads /etc/resolv.conf — on macOS the
+PRIMARY resolver alone, never the scoped table — so the zone NXDOMAINs in corp
+just as it does in direct. `corp sync` therefore mirrors it into the HOTSPOT
+lane, where macOS keeps it off the proxy and resolves it itself.
+
+The fixture offers four shapes on purpose:
+  ts.example            + tail9999.ts.example   two overlay zones, one covering
+                                                the other (the suffix collapse)
+  ovl.corp.example      an overlay zone the user has put in the CORP lane, where
+                        their rule has to win even though it cannot resolve there
+  mixed.corp.example    a CGNAT nameserver AND a public one — somebody's
+                        intranet, which stays the human's call
+  102.100.in-addr.arpa  a reverse zone, which is noise

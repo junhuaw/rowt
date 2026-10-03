@@ -202,6 +202,21 @@ that rewrote `tests/parity/*.md` during a commit touching only `bin/rowt` would
 surprise more than it helps, and the message names the one command that fixes
 it. Not CI, for the same reason the rest of this directory is not there.
 
+**Overlay DNS coverage** — `corp sync` writes a third auto-managed block, and the
+only one outside `corp-domains.txt`: the zones that only an overlay resolver
+answers go on the OS proxy bypass list, in `hotspot-domains.txt`.
+`PARITY_SCENARIO=overlay-dns` supplies a Tailscale-shaped scoped resolver (see
+its README) with four shapes on purpose — two nested overlay zones, one the user
+has claimed in the corp lane, one with a public nameserver alongside the CGNAT
+one, and a reverse zone. `selftest` step 38 renames the marker on one side to
+prove the file is inside what `cli-diff` compares; without that, the two
+implementations could write different bypass lists in silence (the same blind
+spot #51 found for the LaunchAgent plist). `overlay-dhcp-clash` and
+`overlay-dhcp-settled` cover rowt's two auto-mirrors claiming the same zone: the
+settled scenario's config files are the clash run's output byte for byte, so its
+no-op case is the "second watchdog tick changes nothing" proof — without it, a
+zone could ping-pong between the corp lane and the bypass on every tick.
+
 **Watchdog coverage** — the captive decision table of DESIGN.md §11 runs from
 the matrix: clear, captive-by-body, captive-by-redirect, unknown-on-failure,
 plus the drop and restore branches. A scenario overlay
@@ -221,13 +236,16 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `lanes-diff` | all three lane files + messages | 12 edits |
 | `reconcile-diff` | stdout contract vs the Python | 210 cases, 200 randomized |
 | `netdetect-diff` | stdout BYTES vs the Python (key order is contract) | 800 generated cases |
+<!-- `overlay_domains` rides along here: the generator emits CGNAT nameservers
+     and `ts.example`-shaped zones, so the suffix collapse and the
+     "one overlay address is not enough" rule are both differentially covered. -->
 | `vless-diff` | stdout + stderr + exit status vs the Python | 2,000 generated cases |
 | `merge-diff` | the review FILE, plus the streams, vs the Python | 1,500 generated cases |
 | `foreign-diff` | stdout + stderr + exit status, over client config TREES | 1,200 generated cases |
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 6 cases |
 | `platform-diff` | the argv the platform layer produces | 10 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 367 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 376 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human

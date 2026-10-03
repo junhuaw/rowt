@@ -1,0 +1,7 @@
+# Synthetic parity fixture — documentation ranges (RFC 5737) only.
+# The DHCP block below is what an older rowt mirrored from the NIC's search
+# domain, before it knew the same zone is answered only by an overlay resolver.
+corp.example
+
+# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---
+mesh.example

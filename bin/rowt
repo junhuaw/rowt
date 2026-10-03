@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.20"
+ROWT_VERSION="3.5.21"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -943,6 +943,25 @@ CORP_SYNC_MARKER="# --- rowt corp sync (auto-managed; superset of live tunnel ro
 # with ROWT_AUTO_CORP_DOMAINS=0.
 CORP_SYNC_DOM_MARKER="# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---"
 AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
+# corp sync ALSO learns the DNS zones that ONLY an overlay resolver answers — a
+# tailnet's MagicDNS zone (`ts.net`), or whatever base domain a self-hosted
+# control server was given — and puts those on the OS proxy BYPASS list.
+#
+# Why the bypass and not a lane. macOS keeps a SCOPED resolver per zone (see
+# `scutil --dns`), and the only resolver on the machine that consults that table
+# is mDNSResponder, via getaddrinfo. sing-box's `local` server is Go's resolver,
+# which reads /etc/resolv.conf — the PRIMARY resolver alone. So a scoped-only
+# zone answers for the OS and NXDOMAINs in every lane rowt has, corp included:
+# on 2026-10-02 `corp add ts.net` moved the lane and changed nothing, because
+# corp resolves at `local` too. Handing the name to the OS is not a workaround,
+# it is the only resolver that can answer; the traffic then takes the overlay's
+# own route, which is what the unbound corp lane would have done anyway.
+#
+# Same persist-union and same conflict rule as the DHCP domains above: a zone
+# the user has put in a routing lane is theirs, and is never bypassed. The
+# detection lives in net-detect (`overlay_domains`) — a CGNAT nameserver and
+# nothing public alongside it.
+HOTSPOT_SYNC_MARKER="# --- rowt corp sync: overlay DNS zones (auto-managed, do not edit below) ---"
 
 # The busiest non-Tailscale tunnel (the corp VPN), or empty if none is up.
 _vpn_iface() {
@@ -1045,6 +1064,69 @@ _dhcp_search_domains() {
   _tmo 5 "${PY_NETDETECT[@]}" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
 }
 
+# Everything above the auto-managed block in the hotspot file: the header plus
+# whatever the user added by hand.
+_hotspot_head() {
+  [ -f "$HOTSPOT_DOMAINS" ] || return 0
+  awk '/^# --- rowt corp sync/ { exit } { print }' "$HOTSPOT_DOMAINS" \
+    | awk '{ln[NR]=$0} END{ last=NR; while(last>0 && ln[last] ~ /^[[:space:]]*$/) last--; for(i=1;i<=last;i++) print ln[i] }'
+}
+
+# The zones currently in the hotspot file's auto-managed block.
+_hotspot_block_domains() {
+  [ -f "$HOTSPOT_DOMAINS" ] || return 0
+  awk -v m="$HOTSPOT_SYNC_MARKER" '
+    index($0,"# --- rowt corp sync")==1 { inblk=($0==m); next }
+    inblk && NF && $0 !~ /^[[:space:]]*#/ { gsub(/[[:space:]]/,""); if($0!="") print }
+  ' "$HOTSPOT_DOMAINS"
+}
+
+# The DNS zones only an overlay resolver answers. Empty unless the overlay is
+# up — and persisted across that, exactly like a learned corp domain.
+_overlay_domains() {
+  [ "$AUTO_CORP_DOMAINS" = 1 ] || return 0
+  _tmo 5 "${PY_NETDETECT[@]}" 2>/dev/null | jq -r '.overlay_domains[]?' 2>/dev/null || true
+}
+
+# Is $1 inside one of the overlay zones in $2 (newline-separated)? A zone is
+# reported collapsed — `ts.net` stands for every tailnet under it — so a name
+# below one is overlay-served too, and `corp add` is the wrong advice for it.
+_overlay_covers() { # $1=domain $2=zones
+  local d="$1" o
+  while IFS= read -r o; do
+    [ -n "$o" ] || continue
+    case "$d" in "$o"|*".$o") return 0 ;; esac
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# Zones the user has already given a ROUTING job. Their rule wins: rowt must not
+# quietly take a name out of a lane the person chose, even one that cannot
+# resolve there (saying so is `corp sync`'s job, below).
+#
+# The corp lane counts only ABOVE its markers. rowt's own auto-learning must not
+# be able to deadlock with itself: if a network ever advertised an overlay zone
+# as a DHCP search domain, the corp side would mirror it and this side would
+# then refuse to bypass it — leaving a name that resolves nowhere, with a
+# message blaming a choice the user never made. Instead the bypass wins, and
+# because corp sync runs this side first, the corp side sees the zone in the
+# hotspot file (_esc_block_suffixes counts it) and drops its own copy in the
+# same pass: one rewrite, then stable.
+_overlay_claimed_lanes() {
+  { { domains_json; block_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null
+    _corp_head | grep -vE "^[[:space:]]*(#|$)|$_CIDR_RE" 2>/dev/null | sed 's/[[:space:]]//g'
+  } | awk 'NF' | tr 'A-Z' 'a-z' | sort -u || true
+}
+
+# Hand-added hotspot entries. Already bypassed, so nothing to add and nothing to
+# report — the auto block just leaves them to the person who typed them.
+_overlay_claimed_bypass() {
+  _hotspot_head | grep -vE '^[[:space:]]*(#|$)' 2>/dev/null \
+    | sed 's/[[:space:]]//g' | tr 'A-Z' 'a-z' | awk 'NF' | sort -u || true
+}
+
 # Domain suffixes the user has explicitly put in escape, block or hotspot —
 # their choice wins over an auto-discovered corp domain (a network must not
 # de-tunnel them, and a venue's own domain is exactly what the venue advertises
@@ -1062,6 +1144,53 @@ _corp_sync_write() {
   [ -n "$dom" ]  && { printf '\n%s\n' "$CORP_SYNC_DOM_MARKER" >> "$tmp"; printf '%s\n' "$dom"  >> "$tmp"; }
   [ -n "$cidr" ] && { printf '\n%s\n' "$CORP_SYNC_MARKER"     >> "$tmp"; printf '%s\n' "$cidr" >> "$tmp"; }
   mv "$tmp" "$CORP_DOMAINS"; chmod 600 "$CORP_DOMAINS" 2>/dev/null || true
+}
+
+# The overlay side of `corp sync`: keep the OS proxy bypass a superset of the
+# DNS zones only the OS resolver can answer. Nothing is rendered and nothing is
+# reloaded — the hotspot lane is not a routing lane, it is handed to macOS
+# (_hotspot_apply), so this costs a `networksetup` write and only when it changes.
+_overlay_bypass_sync() { # $1=dry-run  $2=quiet
+  local dry="${1:-0}" quiet="${2:-0}"
+  local cur union lanes bypassed desired dropped="" want n
+  cur="$(_hotspot_block_domains)"
+  # Persist-union: a zone learned while the overlay was up stays after it drops,
+  # like a learned corp domain — the tailnet is still the tailnet tomorrow.
+  union="$(printf '%s\n%s\n' "$cur" "$(_overlay_domains)" | awk 'NF' | tr 'A-Z' 'a-z' | sort -u)"
+  # Nothing learned and nothing remembered: leave the file completely alone.
+  # _hotspot_head trims trailing blank lines, so even a no-op reassembly could
+  # differ from the bytes on disk and churn the system proxy for nothing.
+  [ -n "$union" ] || return 0
+  lanes="$(_overlay_claimed_lanes)"; bypassed="$(_overlay_claimed_bypass)"
+  desired="$union"
+  if [ -n "$lanes" ] && [ -n "$desired" ]; then
+    dropped="$(comm -12 <(printf '%s\n' "$desired") <(printf '%s\n' "$lanes"))"
+    desired="$(comm -23 <(printf '%s\n' "$desired") <(printf '%s\n' "$lanes") | grep -E '.' || true)"
+  fi
+  if [ -n "$bypassed" ] && [ -n "$desired" ]; then
+    desired="$(comm -23 <(printf '%s\n' "$desired") <(printf '%s\n' "$bypassed") | grep -E '.' || true)"
+  fi
+  want="$(mktemp)"
+  { _hotspot_head
+    [ -n "$desired" ] && { printf '\n%s\n' "$HOTSPOT_SYNC_MARKER"; printf '%s\n' "$desired"; }
+  } > "$want"
+  n="$(printf '%s' "$desired" | grep -cE '.' || true)"
+  if cmp -s "$want" "$HOTSPOT_DOMAINS" 2>/dev/null; then rm -f "$want"; return 0; fi
+  if [ "$dry" = 1 ]; then
+    echo "  would bypass $n overlay DNS zone(s) only the OS resolver answers: $(printf '%s' "$desired" | paste -sd', ' - 2>/dev/null)"
+    rm -f "$want"; return 0
+  fi
+  [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do
+    [ -n "$d" ] && err "corp sync: '$d' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp, so your rule wins"
+  done <<< "$dropped"
+  # Truncate in place rather than mv: the hotspot file is not 0600 like the corp
+  # one (it holds no route table), and a rename would hand it mktemp's mode.
+  cat "$want" > "$HOTSPOT_DOMAINS"; rm -f "$want"
+  # Logged even under --quiet, like the corp-lane line: this changed the system
+  # proxy, so the watchdog log has to say why.
+  info "corp sync: $n overlay DNS zone(s) bypass the proxy — the OS resolver is the only one that answers them"
+  _hotspot_apply
+  return 0
 }
 
 # rowt corp sync [--iface utunN|<label>] [--dry-run] [--no-reload] [--quiet]
@@ -1118,6 +1247,15 @@ corp_sync() {
   # Persist the last-seen cache (0600: it lists the employer's route table).
   ( umask 077; printf '%s\n' "$out" | sed -n '/^SEEN$/,$p' | tail -n +2 | grep -E '.' > "$seenf" ) 2>/dev/null || true
 
+  # ---- overlay side: zones only the OS resolver answers -> proxy bypass ----
+  # FIRST, because the domain side below reads the hotspot file through
+  # _esc_block_suffixes. Run after it, a zone the corp lane had already learned
+  # over DHCP stayed in BOTH lanes for a tick and cost a second rewrite and a
+  # reload on the next one; run before it, the corp side sees the bypass and
+  # lets go of its copy in this same pass. (A dry run writes nothing, so it
+  # only previews — below, after the corp lines.)
+  [ "$dry" = 1 ] || _overlay_bypass_sync 0 "$quiet"
+
   # ---- domain side: mirror the physical NIC's DHCP search domains ----
   # persist-union of (block ∪ advertised) minus anything the user tunnels/blocks.
   local cur_dom desired_dom="" dropped=""
@@ -1144,6 +1282,7 @@ corp_sync() {
     if cmp -s "$want" "$CORP_DOMAINS" 2>/dev/null; then echo "  corp lane already in sync — no change, no reload"
     else echo "  would set corp lane to $nd DHCP domain(s) + $nc CIDR(s):"; diff <(cat "$CORP_DOMAINS" 2>/dev/null) "$want" | grep -E '^[<>]' | head -40; fi
     _corp_report_refused "$refused" 0
+    _overlay_bypass_sync 1 "$quiet"
     rm -f "$want"; return 0
   fi
 
@@ -1188,9 +1327,10 @@ _corp_report_refused() { # $1=refused CIDRs, one per line  $2=quiet
 # with the corp VPN up. Nothing is added automatically.
 corp_suggest() {
   local j; j="$("${PY_NETDETECT[@]}" 2>/dev/null || echo '{}')"
-  local doms phys ns
+  local doms phys ns ovl
   doms="$(printf '%s' "$j" | jq -r '.internal_domains[]?' 2>/dev/null)"
   phys="$(printf '%s' "$j" | jq -r '.physical_search[]?' 2>/dev/null)"
+  ovl="$(printf '%s' "$j" | jq -r '.overlay_domains[]?' 2>/dev/null)"
   ns="$(printf '%s' "$j" | jq -r '.corp_nameservers[]?' 2>/dev/null | paste -sd', ' -)"
   if [ -z "$doms" ]; then
     info "no internal DNS domains visible right now."
@@ -1202,7 +1342,11 @@ corp_suggest() {
   local d tag extras=""
   while IFS= read -r d; do
     [ -z "$d" ] && continue
-    if printf '%s\n' "$phys" | grep -qxF "$d"; then tag="  ← DHCP search domain — rowt corp-routes this AUTOMATICALLY"; else tag=""; extras="$extras $d"; fi
+    if printf '%s\n' "$phys" | grep -qxF "$d"; then tag="  ← DHCP search domain — rowt corp-routes this AUTOMATICALLY"
+    # Never suggest `corp add` for a zone only an overlay resolver answers: the
+    # corp lane resolves at /etc/resolv.conf's primary, which does not have it.
+    elif _overlay_covers "$d" "$ovl"; then tag="  ← overlay zone — only the OS resolver answers it; corp sync bypasses the proxy for it rather than routing it"
+    else tag=""; extras="$extras $d"; fi
     printf '  %s%s\n' "$d" "$tag"
   done <<EOF
 $doms
@@ -2967,7 +3111,13 @@ _proxy_bypass_ok() { [ "$(networksetup -getproxybypassdomains "$1" 2>/dev/null |
 _proxy_bypass_apply() { # $1=svc
   local -a _bp=(); local _b
   while IFS= read -r _b; do _bp+=("$_b"); done < <(_proxy_bypass_want)
-  _ns_write 0 -setproxybypassdomains "$1" "${_bp[@]}" >/dev/null 2>&1 || true
+  # Passwordless FIRST. The watch sudoers rule covers -setproxybypassdomains,
+  # and `corp sync` reaches this from the watchdog, which has no terminal to be
+  # asked for a password on — `sudo -n` fails instantly there instead of
+  # prompting, and the interactive form is the fallback for a machine that never
+  # installed the rule.
+  _ns_write 1 -setproxybypassdomains "$1" "${_bp[@]}" >/dev/null 2>&1 \
+    || _ns_write 0 -setproxybypassdomains "$1" "${_bp[@]}" >/dev/null 2>&1 || true
 }
 # After a hotspot-lane edit: refresh the live bypass list, but only where rowt
 # already owns the proxy. With the proxy off or pointed elsewhere the list is
@@ -6490,10 +6640,15 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        Each label gets its own auto-managed block; a tunnel that's
                        DOWN keeps its last-learned CIDRs (needed in-office too). The
                        watchdog re-syncs automatically on connect. Hand-added corp
-                       entries above the managed blocks are never touched.
+                       entries above the managed blocks are never touched. It also
+                       mirrors the DNS zones only an OVERLAY resolver answers (a
+                       tailnet's, served from 100.64/10) into the hotspot lane, so
+                       macOS keeps them off the proxy: no lane can resolve such a
+                       zone, and the OS is the only resolver that can.
   suggest              list the internal DNS domains THIS network advertises
                        (DHCP search domains, which are corp-routed automatically,
-                       and scoped resolvers' domains, which are only candidates for
+                       overlay zones, which are proxy-bypassed automatically, and
+                       scoped resolvers' domains, which are only candidates for
                        'corp add'). It sees them only on the corp LAN or VPN.")
 A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
 of the other lanes (block/corp/escape), since the router matches block→corp→escape

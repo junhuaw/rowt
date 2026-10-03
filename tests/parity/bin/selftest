@@ -38,6 +38,7 @@
 #   34.  read past a base64 pad in the Python      -> vless-diff must fire
 #   35.  let an agent's watch install carry on     -> cli-diff must fire
 #   36.  keep empty query values in a share link   -> vless-diff must fire
+#   38.  rename the overlay bypass marker          -> cli-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1084,6 +1085,30 @@ else
     bad "cli-diff passed with the two sides writing a different LaunchAgent Program"
   else
     ok "cli-diff caught a LaunchAgent written with a different Program"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "38. the hotspot file corp sync writes must be inside what cli-diff compares"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The overlay side of `corp sync` writes a THIRD auto-managed block, and the
+  # only one outside corp-domains.txt: the zones only an overlay resolver can
+  # answer go on the OS proxy bypass list, in hotspot-domains.txt. Rename that
+  # marker on one side; if cli-diff still passes, the file has fallen out of the
+  # compared surface and the two implementations could write different bypass
+  # lists in silence.
+  perl -0pi -e 's|# --- rowt corp sync: overlay DNS zones \(auto-managed, do not edit below\) ---|# --- rowt corp sync: overlay zones (auto) ---|' "$tmp/bin/rowt"
+  if grep -qF "overlay DNS zones (auto-managed" "$tmp/bin/rowt"; then
+    bad "could not rename the overlay marker (HOTSPOT_SYNC_MARKER moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=overlay-dns corp sync --no-reload --quiet')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the two sides writing a different overlay bypass block"
+  else
+    ok "cli-diff caught an overlay bypass block written differently"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

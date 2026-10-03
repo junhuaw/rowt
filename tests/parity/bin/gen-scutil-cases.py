@@ -7,6 +7,10 @@ ordering bug the Python's own fixture guards), sub-interfaces that must not read
 as physical, nameservers just inside and just outside each internal range,
 duplicate domains across resolvers, and malformed lines that must be ignored
 rather than crash either side.
+
+`overlay_domains` is covered by the same shapes: `ts.net` next to a sub-zone of
+it (so the suffix collapse fires), and a CGNAT nameserver next to a non-overlay
+one in the same block (so the "one overlay address is not enough" half fires).
 """
 from __future__ import annotations
 import os, random, sys
@@ -14,11 +18,13 @@ import os, random, sys
 DEVS = ["en0", "en1", "en12", "utun4", "utun0", "bridge0", "en0:1", "lo0", "ppp0"]
 DOMS = ["corp.example", "hq.corp.example", "vpn.corp.example", "local",
         "254.169.in-addr.arpa", "8.b.d.0.1.0.0.2.ip6.arpa", "tail1234.ts.net",
-        "search.tailscale", "sub.corp.example", "EXAMPLE.COM", "a.b.c.d.example"]
+        "search.tailscale", "sub.corp.example", "EXAMPLE.COM", "a.b.c.d.example",
+        "ts.net", "TAIL1234.TS.NET"]
 # Deliberately straddling every boundary in the internal-NS list.
 NS = ["10.0.0.53", "9.255.255.255", "11.0.0.1", "12.0.0.1", "30.0.0.1", "31.0.0.1",
       "6.0.0.1", "6.16.0.1", "100.64.0.1", "100.128.0.1", "169.254.1.1",
       "172.15.0.1", "172.16.0.1", "172.32.0.1", "192.168.1.1", "223.5.5.5",
+      "100.100.100.100", "fd7a:115c:a1e0::53",
       "fd00:1::1", "::1", "10.0.0.256", "10.0.0", "not.an.ip"]
 JUNK = ["flags    : Request A records", "reach    : 0x00000002 (Reachable)",
         "order    : 100200", "options  : mdns", "", "  ",

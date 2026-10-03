@@ -1,0 +1,13 @@
+rowt's own two auto-mirrors claiming the same zone — the case that must not
+deadlock or loop.
+
+`mesh.example` is BOTH the physical NIC's DHCP search domain (so the corp side
+mirrors it into corp-domains.txt) and a zone served only by an overlay resolver
+at a CGNAT address (so the overlay side wants it on the proxy bypass). The corp
+lane already holds it in its DHCP block, as an older rowt would have left it.
+
+One `corp sync` must settle it: the overlay side runs FIRST and bypasses the
+zone (only HAND-ADDED corp entries count as the user's claim, so rowt's own
+DHCP copy cannot block it), and the corp side then sees the zone in the hotspot
+file and drops its copy. The result is exactly the fixture of
+`overlay-dhcp-settled`, where a second sync must be a no-op.

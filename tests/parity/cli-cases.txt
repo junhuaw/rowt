@@ -580,6 +580,27 @@ PARITY_SCENARIO=corp-vpn corp sync --no-reload --quiet
 corp sync --no-reload --quiet
 corp suggest
 corp sync --nosuchflag
+# An overlay resolver (Tailscale-style MagicDNS, or any CGNAT resolver). A zone
+# only it answers resolves in NO lane — sing-box's `local` server reads
+# /etc/resolv.conf, which on macOS carries the primary resolver alone — so
+# `corp sync` mirrors it into the hotspot lane instead, and macOS keeps it off
+# the proxy. The scenario also puts one detected zone in the corp lane (the
+# user's rule wins), and offers a reverse zone and a mixed-nameserver zone the
+# detection has to refuse. See fixtures/scenarios/overlay-dns/README.
+PARITY_SCENARIO=overlay-dns corp sync --dry-run
+PARITY_SCENARIO=overlay-dns corp sync --no-reload --quiet
+PARITY_SCENARIO=overlay-dns corp suggest
+# No sync has run in this sandbox, so the zone is still unlisted: the verdict is
+# the final route, and the note says why its overlay address does not make it
+# corp — the router classifies a NAME before resolving anything.
+PARITY_SCENARIO=overlay-dns explain host.ts.example
+# rowt's OWN two mirrors claiming one zone (a DHCP search domain that only an
+# overlay resolver answers). One sync must settle it — the bypass wins, the corp
+# side drops its copy — and the settled scenario is that run's output byte for
+# byte, where a second sync must write nothing, refresh nothing, reload nothing.
+PARITY_SCENARIO=overlay-dhcp-clash corp sync --dry-run
+PARITY_SCENARIO=overlay-dhcp-clash corp sync --no-reload
+PARITY_SCENARIO=overlay-dhcp-settled corp sync --no-reload
 watch
 watch status
 

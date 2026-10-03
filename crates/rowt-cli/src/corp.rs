@@ -23,6 +23,14 @@ pub const MARKER_CIDR: &str =
     "# --- rowt corp sync (auto-managed; superset of live tunnel routes — do not edit below) ---";
 pub const MARKER_DOM: &str =
     "# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---";
+/// The third block, and the only one in a DIFFERENT file: the DNS zones that
+/// only an overlay resolver answers, mirrored into the hotspot lane so macOS
+/// keeps them off the proxy. See `HOTSPOT_SYNC_MARKER` in bin/rowt for why that
+/// is the only place they can work — sing-box's `local` server is
+/// /etc/resolv.conf, which on macOS carries the primary resolver alone, so a
+/// scoped-only zone NXDOMAINs in every lane rowt has, corp included.
+pub const MARKER_OVERLAY: &str =
+    "# --- rowt corp sync: overlay DNS zones (auto-managed, do not edit below) ---";
 
 fn out(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd).args(args).stderr(Stdio::null()).output().ok()
@@ -125,6 +133,48 @@ pub fn assemble(head: &[String], dom: &[String], cidr: &[String]) -> String {
     }
     if !cidr.is_empty() {
         s.push_str(&format!("\n{MARKER_CIDR}\n{}\n", cidr.join("\n")));
+    }
+    s
+}
+
+/// `_overlay_covers` — is this name inside one of the overlay zones?
+///
+/// A zone is reported collapsed — `ts.net` stands for every tailnet under it —
+/// so a name below one is overlay-served too, and `corp add` is the wrong
+/// advice for it.
+fn overlay_covers(d: &str, zones: &[String]) -> bool {
+    zones.iter().any(|o| !o.is_empty() && (d == o || d.ends_with(&format!(".{o}"))))
+}
+
+/// `_hotspot_block_domains` — the zones in the hotspot file's auto block. Same
+/// shape as `block_domains`, keyed on the overlay marker.
+fn overlay_block_domains(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inblk = false;
+    for l in body.lines() {
+        if l.starts_with("# --- rowt corp sync") {
+            inblk = l == MARKER_OVERLAY;
+            continue;
+        }
+        if inblk {
+            let t: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+            if !t.is_empty() && !t.starts_with('#') {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// head + the overlay block. `head` is shared with the corp file: it splits on
+/// the marker PREFIX, which every one of the three markers carries.
+fn overlay_assemble(head: &[String], dom: &[String]) -> String {
+    let mut s = head.join("\n");
+    if !head.is_empty() {
+        s.push('\n');
+    }
+    if !dom.is_empty() {
+        s.push_str(&format!("\n{MARKER_OVERLAY}\n{}\n", dom.join("\n")));
     }
     s
 }
@@ -291,6 +341,95 @@ pub struct Opts {
     pub iface: Option<String>,
 }
 
+/// `_overlay_bypass_sync` — the overlay side of `corp sync`: keep the OS proxy
+/// bypass a superset of the DNS zones only the OS resolver can answer.
+///
+/// Nothing is rendered and nothing is reloaded: the hotspot lane is not a
+/// routing lane, it is handed to macOS, so this costs a `networksetup` write
+/// and only when the set changes. Returns the dry-run line, if any.
+fn overlay_bypass_sync(ctx: &Ctx, dry: bool, quiet: bool) -> Option<String> {
+    let path = ctx.cfg.join("hotspot-domains.txt");
+    let body = read(&path);
+    let cur = overlay_block_domains(&body);
+    // Persist-union: a zone learned while the overlay was up stays after it
+    // drops, like a learned corp domain — the tailnet is still the tailnet
+    // tomorrow. Empty unless ROWT_AUTO_CORP_DOMAINS is on, as for the DHCP side.
+    let mut union: Vec<String> = cur.clone();
+    if env_or("ROWT_AUTO_CORP_DOMAINS", "1") == "1" {
+        union.extend(netdetect::parse(&out("scutil", &["--dns"])).overlay_domains);
+    }
+    let mut union: Vec<String> = union.into_iter()
+        .map(|d| d.to_ascii_lowercase()).filter(|d| !d.is_empty()).collect();
+    union.sort();
+    union.dedup();
+    // Nothing learned and nothing remembered: leave the file completely alone.
+    // `head` trims trailing blank lines, so even a no-op reassembly could differ
+    // from the bytes on disk and churn the system proxy for nothing.
+    if union.is_empty() {
+        return None;
+    }
+    // Zones the user has already given a ROUTING job. Their rule wins: rowt must
+    // not quietly take a name out of a lane the person chose, even one that
+    // cannot resolve there — saying so is this function's job instead.
+    // The corp lane counts only ABOVE its markers. rowt's own auto-learning must
+    // not be able to deadlock with itself: if a network ever advertised an
+    // overlay zone as a DHCP search domain, the corp side would mirror it and
+    // this side would then refuse to bypass it — leaving a name that resolves
+    // nowhere, with a message blaming a choice the user never made. Instead the
+    // bypass wins, and because `run` calls this side first, the corp side sees
+    // the zone in the hotspot file (`esc_block_suffixes` counts it) and drops
+    // its own copy in the same pass: one rewrite, then stable.
+    use rowt_core::render::{parse_list, Filter};
+    let mut lanes: Vec<String> = parse_list(&read(&ctx.cfg.join("escape-domains.txt")), Filter::Domain);
+    lanes.extend(parse_list(&read(&ctx.cfg.join("block-domains.txt")), Filter::Domain));
+    lanes.extend(parse_list(&head(&read(&ctx.cfg.join("corp-domains.txt"))).join("\n"), Filter::Domain));
+    let mut lanes: Vec<String> = lanes.into_iter().map(|d| d.to_ascii_lowercase()).collect();
+    lanes.sort();
+    lanes.dedup();
+    // Hand-added hotspot entries: already bypassed, so nothing to add and
+    // nothing to report — the auto block leaves them to whoever typed them.
+    let hd = head(&body);
+    let mut bypassed: Vec<String> = hd.iter()
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    bypassed.sort();
+    bypassed.dedup();
+
+    let dropped: Vec<String> = union.iter().filter(|d| lanes.contains(d)).cloned().collect();
+    let desired: Vec<String> = union.into_iter()
+        .filter(|d| !lanes.contains(d) && !bypassed.contains(d))
+        .collect();
+
+    let want = overlay_assemble(&hd, &desired);
+    let n = desired.len();
+    if want == body {
+        return None;
+    }
+    if dry {
+        return Some(format!(
+            "  would bypass {n} overlay DNS zone(s) only the OS resolver answers: {}",
+            desired.join(", ")
+        ));
+    }
+    if !quiet {
+        for d in &dropped {
+            eprintln!("error: corp sync: '{d}' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp, so your rule wins");
+        }
+    }
+    // Truncate in place rather than rename: the hotspot file is not 0600 like
+    // the corp one (it holds no route table), and a rename would hand it the
+    // temporary file's mode.
+    if std::fs::write(&path, &want).is_err() {
+        return None;
+    }
+    // Logged even under --quiet, like the corp-lane line: this changed the
+    // system proxy, so the watchdog log has to say why.
+    eprintln!("==> corp sync: {n} overlay DNS zone(s) bypass the proxy — the OS resolver is the only one that answers them");
+    println!("{}", lifecycle::hotspot_apply(ctx));
+    None
+}
+
 pub fn sync(ctx: &Ctx, quiet: bool) -> Result<String, String> {
     run(ctx, &Opts { dry_run: false, no_reload: false, quiet, iface: None })
 }
@@ -409,6 +548,17 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
         Outcome::Change(v) => v.iter().map(|n| n.to_string()).collect(),
     };
 
+    // ---- overlay side: zones only the OS resolver answers -> proxy bypass.
+    // FIRST, because the domain side below reads the hotspot file through
+    // `esc_block_suffixes`. Run after it, a zone the corp lane had already
+    // learned over DHCP stayed in BOTH lanes for a tick and cost a second
+    // rewrite and a reload on the next one; run before it, the corp side sees
+    // the bypass and lets go of its copy in this same pass. (A dry run writes
+    // nothing, so it only previews — below, after the corp lines.)
+    if !o.dry_run {
+        overlay_bypass_sync(ctx, false, o.quiet);
+    }
+
     // ---- domain side: a PERSIST-union of (block ∪ advertised), minus anything
     // the user tunnels or blocks. Persisting matters: a domain learned on the
     // corp LAN must survive a day at home, where nothing advertises it.
@@ -452,6 +602,10 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
                 }
                 let _ = std::fs::remove_file(&tmp);
             }
+        }
+        if let Some(line) = overlay_bypass_sync(ctx, true, o.quiet) {
+            s.push('\n');
+            s.push_str(&line);
         }
         return Ok(s);
     }
@@ -498,6 +652,11 @@ pub fn suggest(_ctx: &Ctx) -> Result<String, String> {
     for dom in &d.internal_domains {
         if d.physical_search.contains(dom) {
             o.push(format!("  {dom}  ← DHCP search domain — rowt corp-routes this AUTOMATICALLY"));
+        // Never suggest `corp add` for a zone only an overlay resolver answers:
+        // the corp lane resolves at /etc/resolv.conf's primary, which does not
+        // have it.
+        } else if overlay_covers(dom, &d.overlay_domains) {
+            o.push(format!("  {dom}  ← overlay zone — only the OS resolver answers it; corp sync bypasses the proxy for it rather than routing it"));
         } else {
             o.push(format!("  {dom}"));
             extras.push(dom);

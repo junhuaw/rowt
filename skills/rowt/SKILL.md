@@ -18,7 +18,12 @@ and a corp VPN coexist because nothing fights over the default route:
 
 Unlisted **private/overlay IPs** (RFC 1918, `100.64/10`, link-local) take the corp lane,
 so VPN, LAN and Tailscale hosts work with no configuration; only unlisted public IPs
-go direct. Everything user-editable lives in `~/.config/rowt/`. The sing-box engine is
+go direct. That is by IP; a **tailnet NAME** is a different case — only the overlay's
+own resolver answers it, and no lane can reach that resolver (sing-box reads
+`/etc/resolv.conf`, which holds the primary resolver alone, so corp fails exactly as
+direct does). `corp sync` detects such a zone and proxy-BYPASSES it instead, so macOS
+resolves and routes it; `rowt explain` then says `BYPASS`. Automatic — never answer a
+failing tailnet name with `rowt corp add`. Everything user-editable lives in `~/.config/rowt/`. The sing-box engine is
 bundled by the formula and pinned (1.13.x; 1.14.x is known-bad). `rowt <cmd> --help` is
 the version-current truth for every command below.
 
@@ -245,6 +250,7 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
 | after a network change | automatic with the watchdog; otherwise `rowt reload` |
 | switch server | `rowt ping` → `rowt use <tag>` / `rowt use auto` |
 | a venue's login page | automatic with the watchdog; recurring venue: `rowt hotspot add <portal-host>` — `watch.log` names the host and prints the exact command |
+| a tailnet/overlay name fails | automatic (`corp sync` bypasses the zone); check with `rowt explain <name>` — `BYPASS` is the healthy answer, `DIRECT` with an overlay-address note means no sync has run yet |
 | abroad, no firewall | `rowt up local` (back: `rowt up host`) |
 | CLI tools | `rowt run <cmd>` · `rowt proxy env` · `rowt-proxy-on` (from shell-init) |
 | watch it live | `rowt monitor` (user's terminal) · `rowt metrics top` |
