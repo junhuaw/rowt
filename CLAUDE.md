@@ -190,6 +190,20 @@ Monitor-only releases still need the manual `ROWT_VERSION` bump in step 1, and
 still rebuild + re-upload the step-4 asset (the pinned resource must point at
 the new tag).
 
+## Shared work queue and review store
+
+Both live in hidden refs of this repository on origin — not branches — and
+**this repository is public**, so anyone can fetch and read them: never put a
+secret, a real employer hostname or a CIDR in a task's text or a review thread.
+
+- **taskq** — `refs/notes/taskq`; `.taskq.json` (`{"shared": {}}`) points at it.
+  `tasks/` is never committed. On every dev box, once, the person runs
+  `taskq share --accept` in their checkout, in a terminal of their own (it
+  refuses inside an agent session); until then agents fall back to a local queue.
+- **mdrev** — `refs/notes/mdrev-review` (no `.mdrev.json`: the project's own
+  repository). On every box, once: `mdrev --review-pair --email <git email>
+  --name "<Name>-on-<box>"`, then confirm in the viewer (`mdrev README.md`).
+
 ## Notes
 
 - **`rowt onboard` is the shared getting-started + reference surface** for both
