@@ -192,20 +192,22 @@ the new tag).
 
 ## Shared work queue and review store
 
-**This repository is public**, so the shared taskq queue lives outside it, in
-the private `github.com/tanghong123/rowt-notes` (collaborators only). mdrev's
-review store is still a hidden ref of this repository, which anyone can fetch
-and read. Either way, never put a secret, a real employer hostname or a CIDR in
-a task's text or a review thread.
+**This repository is public**, so both the shared taskq queue and mdrev's
+review store live outside it, in the private `github.com/tanghong123/rowt-notes`
+(collaborators only), each at its own hidden ref. Still, never put a secret, a
+real employer hostname or a CIDR in a task's text or a review thread.
 
 - **taskq** — `refs/notes/taskq` of `tanghong123/rowt-notes`; `.taskq.json`
   names it. `tasks/` is never committed. On every dev box, once, the person runs
   `taskq share --accept` in their checkout, in a terminal of their own (it
   refuses inside an agent session); they need write access to rowt-notes. Until
   then, taskq on that box says the queue is not accepted there.
-- **mdrev** — `refs/notes/mdrev-review` (no `.mdrev.json`: the project's own
-  repository). On every box, once: `mdrev --review-pair --email <git email>
-  --name "<Name>-on-<box>"`, then confirm in the viewer (`mdrev README.md`).
+- **mdrev** — `refs/notes/mdrev-review` of `tanghong123/rowt-notes`;
+  `.mdrev.json` names it. On every box, once: `mdrev --review-pair --email <git
+  email>` (plus `--name "<Name>-on-<box>"` unless the box has a display name,
+  `mdrev --display-name`), then confirm in the viewer (`mdrev README.md`). It
+  needs mdrev 1.1.20 or later and write access to rowt-notes; mdrev refuses a
+  store anyone can read.
 
 ## Notes
 
