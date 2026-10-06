@@ -355,6 +355,14 @@ would mislabel every server "down". Instead a **background thread** actively run
 clash delay tests through the tunnel (like `rowt ping`) and writes results into a
 shared map; the UI reads the latest.
 
+- **Sampling:** each node is measured three times sequentially, with at most
+  10 workers taking nodes from the pool. A worker publishes each node's result
+  immediately and takes the next node without waiting for slower workers;
+  the UI picks up completed results on its next data tick.
+  The displayed latency is the median of successful
+  samples (the mean when two succeed); no successful sample means down. Each
+  request retains its 5-second timeout. The caption's `probe 2m ago` counts from
+  completion of the entire round; before that, it shows `probe —`.
 - **Target:** `https://www.gstatic.com/generate_204` (overridable via
   `ROWT_PING_URL`). Google's endpoint is blocked when direct, so it 204s only
   *through* a working escape — this tests real escape reachability, matching
@@ -363,9 +371,11 @@ shared map; the UI reads the latest.
 - **Cadence:** every 10 min (`ROWT_MONITOR_PROBE_INTERVAL` secs); first round
   runs immediately. The thread re-reads the pool + secret from config each round,
   so `server add` / `sub update` / a rotated secret are picked up without a
-  restart. It waits on a channel with the interval as a timeout, so a **force
-  signal** (below) wakes it instantly.
-- **Force / self-heal.** `r` forces a re-probe; a pool-membership change forces
+  restart. Between rounds it waits on a zero-capacity channel with the interval
+  as a timeout, so an accepted **force signal** (below) wakes it instantly.
+  Requests during a round are ignored, never queued; `r` reports
+  `previous probe still running…` without resetting the round or its timestamp.
+- **Force / self-heal.** When idle, `r` forces a re-probe; a pool-membership change requests
   one automatically; and — key for network switches — the monitor forces a
   re-probe when the **router transitions down→up** (reload / Wi-Fi change) and
   keeps re-probing ~every 60s while the active server is failing, so a stale
@@ -375,8 +385,9 @@ shared map; the UI reads the latest.
   is treated as *pending* (prober likely dead), never as "down". (Was a fixed
   90s, which emptied the strip between 10-min probes.)
 - **Display.** `up` = last probe succeeded, `down` = tested and failed, pending =
-  not yet probed (shown as `probing…` while the first round runs). Probed servers
-  appear in the list, the active one first and marked `▶` (§6);
+  no fresh reading (shown as `—`, counted as neither up nor down). All pool
+  members appear immediately, including before the first probe and while the
+  router is down, the active one first and marked `▶` when known (§6);
   it's not repeated in the stats line
   (it's already in the identity band). Latency is colored by threshold.
 

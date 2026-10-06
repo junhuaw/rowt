@@ -826,10 +826,13 @@ fn draw_health(
     } else {
         theme::fg(theme::dimmer())
     };
-    let caption_x = if xr - div < 22 { xl } else { div };
+    let age = app.snap.probe_age.map_or_else(|| "—".to_string(),
+        |secs| format!("{} ago", format::age_short(secs)));
+    let caption = truncate(&format!("server health · probe {age}"), xr - xl - 7);
+    let caption_x = if xr - div < dw(&caption) + 7 { xl } else { div };
     put(buf, caption_x + 1, merge_y, "─┤ ", border);
-    put(buf, caption_x + 4, merge_y, "server health", cap);
-    put(buf, caption_x + 4 + dw("server health"), merge_y, " ├", border);
+    put(buf, caption_x + 4, merge_y, &caption, cap);
+    put(buf, caption_x + 4 + dw(&caption), merge_y, " ├", border);
 
     let x0 = xl + 1;
     let w = (xr - 1) - x0 + 1;
@@ -865,14 +868,7 @@ fn draw_health(
     put(buf, stats_x, stats_y, &truncate(&stats, stats_w), theme::fg(theme::dim()));
     put_right(buf, xr - 2, stats_y, &page, theme::fg(theme::dim()));
 
-    // chips row — or a "probing…" hint while the first round is still running
-    // (router up, pool known, but nothing has come back yet), so an empty strip
-    // never looks broken.
-    if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
-        put(buf, x0 + 1, chips_y, "probing…", theme::fg(theme::dim()));
-    } else {
-        draw_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit);
-    }
+    draw_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit);
 }
 
 /// Render whole servers left-to-right, then top-to-bottom, on a manual page.

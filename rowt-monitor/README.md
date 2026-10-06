@@ -40,8 +40,8 @@ toggle the system proxy.
 switches the escape server group between a pinned server and rowt's urltest
 `auto`, which rides the fastest live server and re-probes the pool every
 `ROWT_AUTO_INTERVAL` (default 20m). While it is on, the server auto is actually
-using is marked `▶` in the latency-sorted list (with `—` for latency until its
-first probe, sorted after measured latencies). Turning it off pins *that* server, so traffic stays
+using comes first and is marked `▶` (with `—` for latency until its first probe).
+Turning it off pins *that* server, so traffic stays
 where it is — and with no resolved pick yet it refuses rather than guess.
 Selecting a server with `u` also turns auto off: in auto mode `u` pins any chip,
 auto's own pick included. Each change restarts the router, and rowt does not
@@ -152,6 +152,8 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
   needed, a page counter. The active `▶` server comes first; remaining entries
   sort by latency ascending (unknown after known, equal latencies by name),
   with failed servers marked `down` at the end.
+  All pool members appear immediately, even before probing or while the router
+  is down. Pending readings show `—` and do not count as up or down.
   Down servers can be selected but cannot be switched to with `u`.
   Entries wrap automatically and occupy at most **three rows**.
   The active server stays first even if its probe fails. There is no
@@ -161,6 +163,15 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
   that server. Names too wide for a whole row use a middle `…`, keeping up to
   the first 10 and last 5 characters (fewer when necessary) and the latency.
   Switching servers always uses the full name.
+  Each probe round measures every node three times, with at most 10 nodes
+  being tested concurrently. Each finished node publishes its result immediately
+  and frees a slot for the next node, without waiting for other nodes.
+  Results appear on the next UI data tick. Latency is the median of successful samples
+  (the mean for two); all three failing yields `down`. The section caption shows
+  the age of the last completed round, such as `probe 2m ago`, or `probe —`
+  before a round completes. The 10-minute interval and 5-second timeout stay the same.
+  Pressing `r` during a round reports `previous probe still running…` and is
+  ignored: it neither restarts nor queues another round, and does not reset the age.
 
 The interactive layout supports **40 columns × 12 rows** (including the footer).
 Small windows use a compact header and fewer table columns, keeping the two

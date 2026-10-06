@@ -23,7 +23,7 @@
 │ direct gateway.icloud.com:443                        2       610K      519K  final         │     8   timeout     rr5.googlevideo.com               │
 │ escape netflix.com                                   0         0B        0B                │                                                       │
 │                                                                                            │                                                       │
-├────────────────────────────────────────────────────────────────────────────────────────────┴─┤ server health ├─────────────────────────────────────┤
+├────────────────────────────────────────────────────────────────────────────────────────────┴─┤ server health · probe — ├───────────────────────────┤
 │ auto off   10 servers · 9 up · 1 down                                                                                                              │
 │ ▶ JP-Tokyo  42 ms   NL-Ams  68 ms   KR-Seoul  72 ms   SG-1  81 ms   HK-1  82 ms   TW-Taipei 110 ms   US-LA 151 ms   JP-Osaka 175 ms                │
 │ DE-Frankfurt 195 ms   US-NY down                                                                                                                   │

@@ -183,6 +183,7 @@ impl Source for FixtureSource {
             servers_total: 10,
             servers_up: 9,
             servers_down: 1,
+            probe_age: None,
             active_server: "JP-Tokyo".into(),
             auto_now: None,
             chips,

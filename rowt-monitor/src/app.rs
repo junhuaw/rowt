@@ -538,8 +538,11 @@ impl App {
             ToggleHelp => self.help = !self.help,
             TogglePause => self.paused = !self.paused,
             ForceProbe => {
-                self.source.force_probe();
-                self.notify("re-probing servers…".to_string());
+                let message = match self.source.force_probe() {
+                    Ok(()) => "re-probing servers…",
+                    Err(message) => message,
+                };
+                self.notify(message.to_string());
             }
             Route(lane) => self.arm(Target::Lane(lane), false),
             Unroute => self.arm(Target::Direct, false),

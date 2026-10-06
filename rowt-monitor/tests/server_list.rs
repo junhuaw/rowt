@@ -22,6 +22,50 @@ fn draw(app: &App, w: u16, h: u16) -> (ratatui::buffer::Buffer, ui::Hit) {
 }
 
 #[test]
+fn pending_servers_are_visible_and_pageable_even_when_the_router_is_down() {
+    let mut app = app();
+    app.snap.servers_total = app.snap.chips.len() as u32;
+    app.snap.servers_up = 0;
+    app.snap.servers_down = 0;
+    for server in &mut app.snap.chips { server.ms = None; }
+    app.focus = Focus::Health;
+    for router_up in [true, false] {
+        app.snap.identity.router_up = router_up;
+        app.strip_page = 0;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let (buf, hit) = draw(&app, 40, 11);
+            assert!(!hit.chips.is_empty());
+            for (r, i) in &hit.chips {
+                let text: String = (r.x..r.right()).map(|x| buf[(x, r.y)].symbol()).collect();
+                assert!(text.ends_with(" —"), "{text}");
+                seen.push(*i);
+            }
+            app.feed_strip(&hit);
+            app.update(Action::Down);
+        }
+        assert_eq!(seen, app.server_order());
+    }
+}
+
+#[test]
+fn probe_age_is_visible_in_wide_and_minimum_windows_without_covering_paging() {
+    let mut app = app();
+    for (age, label) in [(None, "probe —"), (Some(12), "probe 12s ago"), (Some(125), "probe 2m ago")] {
+        app.snap.probe_age = age;
+        for (w, h) in [(150, 30), (40, 11)] {
+            let (buf, hit) = draw(&app, w, h);
+            let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains(label), "{w}x{h}: missing {label}");
+            if w == 40 {
+                assert!(text.contains("↑↓ 1/4"));
+                assert_eq!(hit.strip_rows, 1);
+            }
+        }
+    }
+}
+
+#[test]
 fn active_server_leads_and_remaining_servers_wrap_in_latency_order() {
     let app = app();
     let (_, hit) = draw(&app, 96, 30);

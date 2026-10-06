@@ -876,11 +876,17 @@ reports its background wrongly, or if you switch light/dark mid-session.
 - **server health** — `N up / N down`, with the active server first and marked
   `▶`. Other servers sort by latency from low to high (unknown after known),
   followed by failed servers marked `down`; these can be selected but not used.
+  The complete pool is shown immediately; nodes without a reading display `—`.
   Servers wrap across at most three rows, with no automatic scrolling. `Tab` into it,
   `←→` selects a server, and `↑↓` / `PgUp` / `PgDn` or the mouse wheel over the
   list changes pages; the page counter appears beside the pool counts.
   Servers are probed through the tunnel against Google's `generate_204` every
-  10 min (press `r` to re-probe now).
+  10 min (press `r` to re-probe now), three samples per node with at most 10
+  nodes tested concurrently. Completed nodes update individually and free a
+  slot for the next node. Latency uses the median of successful samples;
+  the server-health caption shows how long ago the last round completed.
+  Pressing `r` while a round is running only reports that it is still in progress;
+  it does not restart or queue another round.
 
 **Navigation:** `↑↓`/`jk` move (the first press *locks* a row by domain, so a
 mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forgets
