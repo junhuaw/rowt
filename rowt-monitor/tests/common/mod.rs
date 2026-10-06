@@ -51,7 +51,7 @@ impl Source for Recording {
             }
             if let Some(p) = pick {
                 if !s.chips.iter().any(|c| c.name == p) {
-                    s.chips.push(Server { name: p.to_string(), ms: None, active: true });
+                    s.chips.push(Server { down: false, name: p.to_string(), ms: None, active: true });
                 }
             }
             s.chips.sort_by_key(|c| !c.active);

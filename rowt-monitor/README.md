@@ -40,8 +40,8 @@ toggle the system proxy.
 switches the escape server group between a pinned server and rowt's urltest
 `auto`, which rides the fastest live server and re-probes the pool every
 `ROWT_AUTO_INTERVAL` (default 20m). While it is on, the server auto is actually
-using holds the strip's left edge (with `—` for latency until its first probe)
-and the rest scroll past it. Turning it off pins *that* server, so traffic stays
+using is marked `▶` in the latency-sorted list (with `—` for latency until its
+first probe, sorted after measured latencies). Turning it off pins *that* server, so traffic stays
 where it is — and with no resolved pick yet it refuses rather than guess.
 Selecting a server with `u` also turns auto off: in auto mode `u` pins any chip,
 auto's own pick included. Each change restarts the router, and rowt does not
@@ -147,11 +147,26 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
   presenting a days-old binary as current.
 - **`live connections`** and **`errors & blocked`** panes — side by side,
   split by a center rule (tab labels shorten on narrow terminals).
-- Full-width **`server health`** strip, merged onto the closing `┴` rule. The row
-  above it leads with the **`auto` on/off toggle**, then the pool counts. When the
-  pool overflows the row it marquees, with the active `▶` server — the pinned one,
-  or in auto mode the one urltest is using — held at the left edge (` │ ` seam) so
-  it never scrolls out of view.
+- Full-width **`server health`** list, merged onto the closing `┴` rule. The row
+  above it leads with the **`auto` on/off toggle**, then pool counts and, when
+  needed, a page counter. The active `▶` server comes first; remaining entries
+  sort by latency ascending (unknown after known, equal latencies by name),
+  with failed servers marked `down` at the end.
+  Down servers can be selected but cannot be switched to with `u`.
+  Entries wrap automatically and occupy at most **three rows**.
+  The active server stays first even if its probe fails. There is no
+  automatic scrolling. Focus with `Tab`; `←→` selects servers, while `↑↓`/`jk`,
+  `PgUp`/`PgDn`, or the wheel over the list changes pages. Selection follows the
+  server name across probe refreshes, and selecting across a page boundary reveals
+  that server. Names too wide for a whole row use a middle `…`, keeping up to
+  the first 10 and last 5 characters (fewer when necessary) and the latency.
+  Switching servers always uses the full name.
+
+The interactive layout supports **40 columns × 12 rows** (including the footer).
+Small windows use a compact header and fewer table columns, keeping the two
+panes side by side. Below 21 rows, the server list uses one row with paging;
+taller windows show up to three rows as needed. Below 40×12, a resize hint
+replaces the layout; expanding the terminal restores the display and server page.
 
 ## Data sources
 
@@ -167,9 +182,9 @@ Everything is derived on a 2-second tick from: the clash API
   pipeline (clash API, incremental log tailing, block-lane bucketing, the
   server-health prober), rendering, interactions, resource characteristics, and
   the testing strategy.
-- **[`renders/`](renders/)** — the reference frames: `.txt` captures frozen
-  from the original design, and `.ansi` renders of the current UI, regenerated
-  when the layout changes (DESIGN.md §4.2).
+- **[`renders/`](renders/)** — the reference frames: `.txt` glyph baselines and
+  per-theme `.ansi` renders, updated when the layout changes (DESIGN.md §4.2).
+  Filenames retain the original sizes; tests use 96×41, 150×30 and 212×30.
 - **[`../archive/ux-design/rowt_monitor/`](../archive/ux-design/rowt_monitor/)**
   — the original UX handoff (spec + HTML prototype), archived. The monitor has
   moved past it; DESIGN.md §10 lists the deliberate deviations.

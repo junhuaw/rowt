@@ -141,18 +141,18 @@ impl Source for FixtureSource {
             err(8, ErrKind::Timeout, "rr5.googlevideo.com"),
         ];
 
-        // The active server appears in the strip too, marked; the rest are the
-        // idle-up pool. (total 10 = 9 up incl. active + 1 down.)
+        // The complete probed pool: 9 up (including active) and 1 down.
         let chips = vec![
-            Server { name: "JP-Tokyo".into(), ms: Some(42), active: true },
-            Server { name: "JP-Osaka".into(), ms: Some(175), active: false },
-            Server { name: "KR-Seoul".into(), ms: Some(72), active: false },
-            Server { name: "DE-Frankfurt".into(), ms: Some(195), active: false },
-            Server { name: "HK-1".into(), ms: Some(82), active: false },
-            Server { name: "SG-1".into(), ms: Some(81), active: false },
-            Server { name: "TW-Taipei".into(), ms: Some(110), active: false },
-            Server { name: "US-LA".into(), ms: Some(151), active: false },
-            Server { name: "NL-Ams".into(), ms: Some(68), active: false },
+            Server { down: false, name: "JP-Tokyo".into(), ms: Some(42), active: true },
+            Server { down: false, name: "JP-Osaka".into(), ms: Some(175), active: false },
+            Server { down: false, name: "KR-Seoul".into(), ms: Some(72), active: false },
+            Server { down: false, name: "DE-Frankfurt".into(), ms: Some(195), active: false },
+            Server { down: false, name: "HK-1".into(), ms: Some(82), active: false },
+            Server { down: false, name: "SG-1".into(), ms: Some(81), active: false },
+            Server { down: false, name: "TW-Taipei".into(), ms: Some(110), active: false },
+            Server { down: false, name: "US-LA".into(), ms: Some(151), active: false },
+            Server { down: false, name: "NL-Ams".into(), ms: Some(68), active: false },
+            Server { down: true, name: "US-NY".into(), ms: None, active: false },
         ];
 
         Snapshot {

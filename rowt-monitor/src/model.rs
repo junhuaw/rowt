@@ -312,9 +312,9 @@ pub const AUTO_GROUP: &str = "auto";
 #[derive(Clone, Debug)]
 pub struct Server {
     pub name: String,
-    /// Latest probe RTT. `None` only for auto's live pick before the prober
-    /// has a reading for it (drawn as `—`); every other chip is a probed-up one.
+    /// Latest probe RTT. `None` for failed or pending probes.
     pub ms: Option<u32>,
+    pub down: bool, // a failed probe; pending readings are not down
     pub active: bool, // the server carrying escape traffic — the pin, or auto's pick
 }
 
@@ -374,7 +374,7 @@ pub struct Snapshot {
     /// names a pool member; `None` otherwise — including auto before the first
     /// read lands. Turning auto off pins exactly this, so it is never guessed.
     pub auto_now: Option<String>,
-    pub chips: Vec<Server>, // up pool, active first, then by latency
+    pub chips: Vec<Server>, // probed pool plus auto's pending pick; UI sorts by health and latency
 }
 
 #[cfg(test)]

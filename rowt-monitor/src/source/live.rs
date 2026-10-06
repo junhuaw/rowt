@@ -547,7 +547,7 @@ impl LiveSource {
 ///
 /// The *active* server is the one carrying escape traffic: the pinned tag in
 /// manual mode, urltest's live pick (`auto_now`) in auto mode. It is marked in
-/// the strip — which pins it at the left — and its own probe drives the header's
+/// the strip, and its own probe drives the header's
 /// latency and the LIVE/ERROR dot. Auto with no resolved pick falls back to the
 /// pool: the fastest up server stands in for the latency (it is what urltest
 /// converges on), and the pool is healthy if any member is up.
@@ -562,22 +562,25 @@ fn health_view(members: &[String], selected: String, auto_now: Option<String>, f
             Some(Some(ms)) => {
                 up += 1;
                 // All up servers appear in the strip; the active one is marked.
-                chips.push(Server { name: tag.clone(), ms: Some(ms), active: in_use.as_deref() == Some(tag.as_str()) });
+                chips.push(Server { down: false, name: tag.clone(), ms: Some(ms), active: in_use.as_deref() == Some(tag.as_str()) });
             }
-            Some(None) => down += 1,
+            Some(None) => {
+                down += 1;
+                chips.push(Server { down: true, name: tag.clone(), ms: None, active: in_use.as_deref() == Some(tag.as_str()) });
+            }
             None => {} // pending first probe — neither up nor down yet
         }
     }
-    // Auto's pick holds the left of the strip even without a probe reading for
+    // Auto's pick stays in the strip even without a probe reading for
     // it — right after `use auto` restarts the router, or when the prober and
     // urltest disagree. An empty slot under "auto on" would read as broken; the
     // latency shows `—` until a probe lands.
     if let (true, Some(pick)) = (auto, auto_now.as_deref()) {
         if !chips.iter().any(|c| c.name == pick) {
-            chips.push(Server { name: pick.to_string(), ms: None, active: true });
+            chips.push(Server { down: false, name: pick.to_string(), ms: None, active: true });
         }
     }
-    // Active first, then the rest by latency (a missing reading last).
+    // Keep the source's active-first order; the UI sorts by health and latency.
     chips.sort_by_key(|c| (!c.active, c.ms.is_none(), c.ms));
 
     let probed = |up: u32, down: u32| if up > 0 { Some(true) } else if down > 0 { Some(false) } else { None };
@@ -1461,9 +1464,10 @@ mod auto_selection_tests {
     fn manual_mode_marks_the_pinned_server() {
         let h = health_view(&pool(), "SG-1".into(), None, verdicts(&[("JP-1", Some(40)), ("SG-1", Some(80)), ("US-1", None)]));
         let chips: Vec<_> = h.chips.iter().map(|c| (c.name.as_str(), c.active)).collect();
-        assert_eq!(chips, vec![("SG-1", true), ("JP-1", false)], "pinned first, down servers are not chips");
+        assert_eq!(chips, vec![("SG-1", true), ("JP-1", false), ("US-1", false)], "down servers remain visible");
         assert_eq!((h.active_ms, h.active_ok), (Some(80), Some(true)));
         assert_eq!((h.total, h.up, h.down), (3, 2, 1));
+        assert!(h.chips.iter().find(|c| c.name == "US-1").unwrap().down);
     }
 
     #[test]
@@ -1480,6 +1484,7 @@ mod auto_selection_tests {
         let h = health_view(&pool(), AUTO_GROUP.into(), Some("US-1".into()), verdicts(&[("JP-1", Some(40))]));
         assert_eq!((h.chips[0].name.as_str(), h.chips[0].ms, h.chips[0].active), ("US-1", None, true), "pinned, drawn with —");
         assert_eq!((h.active_ms, h.active_ok), (None, None), "pending: no alarm");
+        assert!(!h.chips[0].down);
     }
 
     #[test]
@@ -1487,6 +1492,17 @@ mod auto_selection_tests {
         let h = health_view(&pool(), AUTO_GROUP.into(), Some("US-1".into()), verdicts(&[("JP-1", Some(40)), ("US-1", None)]));
         assert_eq!((h.chips[0].name.as_str(), h.chips[0].ms, h.chips[0].active), ("US-1", None, true));
         assert_eq!(h.active_ok, Some(false));
+        assert!(h.chips[0].down);
+    }
+
+    #[test]
+    fn all_down_servers_remain_visible_including_the_manual_pin() {
+        let h = health_view(&pool(), "SG-1".into(), None,
+            verdicts(&[("JP-1", None), ("SG-1", None), ("US-1", None)]));
+        assert_eq!((h.total, h.up, h.down), (3, 0, 3));
+        assert_eq!(h.chips.len(), 3);
+        assert!(h.chips.iter().all(|c| c.down && c.ms.is_none()));
+        assert!(h.chips.iter().any(|c| c.name == "SG-1" && c.active));
     }
 
     #[test]

@@ -873,15 +873,20 @@ reports its background wrongly, or if you switch light/dark mid-session.
 - **errors & blocked** — failures and sinkholed domains over a rolling window
   (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
   refused = persistent, blocked = purple).
-- **server health** — `N up / N down`, and a marquee of the reachable pool with
-  latencies (the active server marked `▶`). `Tab` into it and `←→` picks a chip.
+- **server health** — `N up / N down`, with the active server first and marked
+  `▶`. Other servers sort by latency from low to high (unknown after known),
+  followed by failed servers marked `down`; these can be selected but not used.
+  Servers wrap across at most three rows, with no automatic scrolling. `Tab` into it,
+  `←→` selects a server, and `↑↓` / `PgUp` / `PgDn` or the mouse wheel over the
+  list changes pages; the page counter appears beside the pool counts.
   Servers are probed through the tunnel against Google's `generate_204` every
   10 min (press `r` to re-probe now).
 
 **Navigation:** `↑↓`/`jk` move (the first press *locks* a row by domain, so a
 mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forgets
-its selection) · `←→`/`hl` switch pane / pick a server chip (the strip freezes
-in place and wraps at the ends) · `Tab` cycle focus (connections → errors → health)
+its selection) · `←→`/`hl` switch pane / pick a server in latency order
+(wrapping at the ends); in server health, `↑↓`/`jk` and `PgUp`/`PgDn` change pages
+· `Tab` cycle focus (connections → errors → health)
 · `v` flip the connections pane (live / ↑ upload / ↓ download) · `s` span (the
 metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `/` search
 hosts (regex, filters both panes; `↵` commit, `esc` clear) · `w` / `[` `]`
@@ -930,8 +935,8 @@ place), or `sys proxy` to toggle it (hover-highlights).
   auto off).
 - `a` — auto server selection on/off, from any pane (or click `auto` above the
   strip). On rides the fastest live server (`rowt use auto`: urltest, re-probed
-  every 20m) and pins the server it is using at the strip's left edge; off pins
-  that server, so traffic stays put. Each change restarts the router.
+  every 20m); the server it is using comes first with a `▶` marker. Off pins that
+  server, so traffic stays put. Each change restarts the router.
 - `o` — toggle the macOS system proxy on/off (immediate).
 
 **Sources:** the clash API (`127.0.0.1:9090`), `host.json`, `state`/`servers.json`,

@@ -375,9 +375,9 @@ shared map; the UI reads the latest.
   is treated as *pending* (prober likely dead), never as "down". (Was a fixed
   90s, which emptied the strip between 10-min probes.)
 - **Display.** `up` = last probe succeeded, `down` = tested and failed, pending =
-  not yet probed (shown as `probing…` while the first round runs). All up servers
-  appear in the strip, the active one marked `▶` and sorted first (and pinned at
-  the left edge once the strip marquees, §6); it's not repeated in the stats line
+  not yet probed (shown as `probing…` while the first round runs). Probed servers
+  appear in the list, the active one first and marked `▶` (§6);
+  it's not repeated in the stats line
   (it's already in the identity band). Latency is colored by threshold.
 
 ### 5.5 system facts
@@ -403,32 +403,26 @@ interface, the system-proxy state, and router liveness/port.
   if the domain leaves the list — so the acted-on domain can't shift under the 2s
   re-sort. `Esc` releases it, and it also **auto-clears after 15s of input
   inactivity** (`SELECTION_IDLE_TIMEOUT`, checked in `on_frame`; any key/click
-  resets the timer, hover doesn't) so a held selection / frozen strip doesn't
+  resets the timer, hover doesn't) so a held selection doesn't
   stay stuck if the operator walks away — the panes then resume live scrolling.
-- **Server strip:** when the pool overflows the row, the **active `▶` chip is
-  pinned** at the strip's left edge and only the rest marquees past it, in the
-  width left over (a ` │ ` seam marks the join) — so the server you're actually on
-  never scrolls out of view. The pinned chip sits *outside* the ring: it's excluded
-  from the ring's cell buffer, and the viewport width fed back is the **ring's**,
-  not the whole strip's. Pinning is skipped when it would leave less than
-  `MIN_RING_W` to scroll in (narrow terminal / long active name), and when the pool
-  fits (static layout) there's nothing to pin. Focusing keeps the marquee running;
-  the first `←/→` (or a click) **freezes it at the exact offset the renderer last
-  drew** — the renderer feeds its marquee offset back each frame as
-  `Hit::strip_render_off`, and App freezes to that value, so the frozen view is
-  precisely the snapshot on screen (no jump; a partial chip may sit before the
-  selection). It then selects the first fully-visible chip — the pinned one when
-  there is one, since it's held at the left edge. Moves wrap at the ends and scroll
-  the frozen ring one cell at a time to keep the selection visible (a no-op on the
-  pinned chip, which is always visible); the frozen ring renders circularly (wraps
-  past the last chip to fill the row). Ring viewport width and the pinned index
-  also come back via `Hit` — `App::feed_strip` takes all three together, since
-  feeding one without the others desyncs App's mirror of the layout. The marquee
-  runs off a **resettable baseline** (`marquee_off0` at
-  `marquee_t0`), not raw elapsed time: on **unfreeze** (Esc / focus-leave / idle
-  timeout) the baseline is set to the frozen offset and the clock restarted, so it
-  **resumes scrolling from where it stopped** rather than jumping to where a
-  free-running clock would be.
+- **Server list:** the active `▶` server comes first, even if its probe fails.
+  Remaining entries sort by latency ascending, missing readings last, then name
+  for ties. Other failed servers are displayed last, marked `down`; they
+  remain selectable, but `u` refuses to use them. Pending probes are distinct
+  from failures. Highlighting an entry does not reorder the list. Whole entries wrap
+  into at most three rows; the renderer reserves those rows before laying out the
+  connection/error panes. Below 21 terminal rows (including the footer), the list
+  collapses to one row. Additional rows form manual pages (`↑↓`/`jk`,
+  `PgUp`/`PgDn`, or mouse wheel over the list), with a page counter beside the
+  pool stats. `←→` walks the sorted order, wraps at the ends, and reveals the
+  selected entry's page. Clicking selects an entry in place. The renderer feeds
+  the width, row count and current page back to App. Polling remaps selection by
+  server name so a probe result cannot change the target of `u`; a removed server
+  clears selection. Names too wide for one row use a middle `…`, keeping up to
+  10 leading and 5 trailing characters, reduced further to fit the display width,
+  while retaining latency. Actions still use the full name.
+  There is no server marquee. `Tab`/`Shift-Tab` leave
+  the list, and `Esc` clears its selection without changing pages.
 - **Control layer** (§1): contextual keys act on the current selection —
   `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `t` puts
   it on the hotspot lane (the OS proxy-bypass list — `app::Target::Hotspot`,
@@ -500,7 +494,7 @@ interface, the system-proxy state, and router liveness/port.
   captions. Changing it re-polls immediately (cheap in-memory re-aggregation).
 - **Mouse:** wheel scrolls (and focuses) the list under the pointer; clicking a
   row / lane / window-tab activates it; clicking a **server chip** focuses the
-  strip and selects it *in place* (both partial edge chips are hit-tested);
+  list and selects it *in place* (every visible entry is hit-tested);
   clicking **`sys proxy`** toggles it. Hover over `sys proxy` highlights it — this
   needs any-motion reporting (xterm `1003`, enabled alongside SGR-1006 capture and
   disabled on exit). Clickable regions are recorded into `Hit` each draw.
@@ -564,9 +558,10 @@ pool.
 
 ## 10. Intentional deviations from the frozen capture
 
-The `renders/*.txt` captures are a frozen snapshot of the handoff; a few things were
-deliberately changed after review (each masked in the golden test and covered by
-a dedicated assertion):
+The `renders/*.txt` baselines originated in the handoff and are updated for
+intentional layout changes. The server list is now checked without masking;
+legacy identity-band masks retain dedicated assertions. Changes since the
+handoff include:
 
 - **Logo bottom row** shifted one space left so its stems align with the rows
   above.
@@ -576,8 +571,9 @@ a dedicated assertion):
   there's no reading (name greys out).
 - **Errors TYPE colored by category** (dns=orange, timeout/reset/refused=red,
   blocked=purple) — the color carries the category.
-- **Server strip** shows the active server marked `▶` (the capture excluded it);
-  the stats line dropped `active <name>` since it's in the identity band.
+- **Server list** wraps into at most three rows with manual paging and latency
+  ordering. The active server is marked `▶`; the stats line omits its name since
+  it is already in the identity band. These rows are included in the goldens.
 - **Connections table** drops the per-row `↑`/`↓` (redundant with the UP/DOWN
   column headers; header rate rows keep theirs), and shows cumulative bytes
   (§5.1). Header/lane rows show `—` when a row has no connections.

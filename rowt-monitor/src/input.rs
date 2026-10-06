@@ -59,6 +59,8 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Left | KeyCode::Char('h') => Action::FocusLeft,
         KeyCode::Right | KeyCode::Char('l') => Action::FocusRight,
+        KeyCode::PageUp if app.focus == crate::app::Focus::Health => Action::PageServers(-1),
+        KeyCode::PageDown if app.focus == crate::app::Focus::Health => Action::PageServers(1),
         KeyCode::Tab => Action::CycleFocus,
         KeyCode::BackTab => Action::CycleFocusBack,
         KeyCode::Char('f') => Action::LaneCycle,
@@ -143,7 +145,9 @@ pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
         // the pointer is actually over a pane; over anything else it's a no-op.
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
             let d = if matches!(m.kind, MouseEventKind::ScrollDown) { 1 } else { -1 };
-            if in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row) {
+            if in_rect(hit.server_list, col, row) {
+                Some(Action::PageServers(d))
+            } else if in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row) {
                 Some(Action::ScrollErr(d))
             } else if in_rect(hit.conn_pane, col, row) || in_rect(hit.conn_list, col, row) {
                 Some(Action::ScrollConn(d))
