@@ -212,10 +212,12 @@ where
     }
     let op = if rest.is_empty() { cmd.to_string() } else { format!("{cmd} {}", rest.join(" ")) };
     let t0 = std::time::Instant::now();
+    crate::lanelog::begin(cfg);
     audit(cfg, &format!("BEGIN {op}"));
     crate::set_audit_op(&op);
     let r = body(cmd, &rest);
     crate::set_audit_op("");
+    crate::lanelog::end(cfg, "");
     let rc = if r.is_ok() { 0 } else { 1 };
     audit(cfg, &format!("END   {op} rc={rc} ({}s)", t0.elapsed().as_secs()));
     r

@@ -601,6 +601,16 @@ PARITY_SCENARIO=overlay-dns explain host.ts.example
 PARITY_SCENARIO=overlay-dhcp-clash corp sync --dry-run
 PARITY_SCENARIO=overlay-dhcp-clash corp sync --no-reload
 PARITY_SCENARIO=overlay-dhcp-settled corp sync --no-reload
+# Lane membership in the audit log: every change is a `LANE <from> -> <to>`
+# line, compared as part of the audit. The monitor's `d` (route to direct) is an
+# `rm` against all four lanes — only the lane that held it may log, and it must
+# name itself. lane-outside-edit ships a cache/lane-state.tsv that disagrees
+# with its lane files: the next mutating command and the next watchdog tick
+# must both log those as `outside rowt` BEFORE their own lines (see its README).
+block rm tracker.example.net --no-reload
+escape rm tracker.example.net --no-reload
+PARITY_SCENARIO=lane-outside-edit corp sync --no-reload
+PARITY_NOTRACE=1 PARITY_SCENARIO=lane-outside-edit watch tick
 watch
 watch status
 

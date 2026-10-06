@@ -577,6 +577,33 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   stalling on a dead network) still leaves a trace. Read-only commands and the
   high-frequency `watch tick` no-op aren't recorded. Included in `rowt report`.
 
+  **Lane membership is in it too, entry by entry.** A bracket alone said that
+  `block import my-list.txt` ran, not what it added — on 2026-10-06, finding
+  why one site's bot-defence host was blocked meant digging a month-old import
+  file off the disk. Now each command's bracket also diffs every `(lane, entry)`
+  pair across the four lane files and logs one line per transition:
+
+  ```
+  … BEGIN block rm att-api.example --no-reload
+  … LANE block -> direct (1): att-api.example
+  … END   block rm att-api.example --no-reload rc=0 (0s)
+  … LANE direct -> block (336): a.example b.example …     # one import, in full
+  … LANE escape -> block (1): moved.example               # an add's pull-out
+  … LANE outside rowt: direct -> block (1): hand.example  # edited behind rowt's back
+  … LANE watchdog corp sync: direct -> corp (2): 10.9.0.0/16 …
+  ```
+
+  `direct` means "in no lane". The monitor's routing keys are covered for free —
+  they shell out to `rowt <lane> add|rm` — and of the four `rm`s a `d` sends,
+  only the lane that held the host logs, by name. Entries are kept as written
+  (`domain:x`, `*.x`), so reversing a line is re-adding exactly that text, and
+  the list is never truncated (`AUDIT_MAX` counts lines, so a long line costs
+  one). A change made outside rowt — an editor, an agent writing the file
+  directly — is caught against `cache/lane-state.tsv`, the last logged state,
+  at the next mutating command or watchdog tick, and logged as `outside rowt`
+  *before* that command's `BEGIN` rather than blamed on it. A no-op logs
+  nothing: the tick runs every two minutes.
+
 ## 11. Captive portals: detection, drop, restore
 
 Public hotspots (airports, hotels, lounges) gate internet access behind a login

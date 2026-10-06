@@ -1,0 +1,11 @@
+block	domain:not-a-dup.example
+corp	10.99.0.0/16
+corp	198.51.100.0/24
+corp	corp.example
+corp	intranet.corp.example
+escape	example.com
+escape	geosite:google
+escape	gone.example
+escape	spaced.example.org
+escape	sub.example.net
+escape	tracker.example.net

@@ -19,6 +19,7 @@ mod fetch;
 mod help;
 mod lifecycle;
 mod importer;
+mod lanelog;
 mod onboard;
 mod pool;
 mod shell;
@@ -102,6 +103,8 @@ pub fn die(cfg: &Path, msg: &str) -> ! {
     eprintln!("error: {msg}");
     let op = AUDIT_OP.lock().map(|g| g.clone()).unwrap_or_default();
     if !op.is_empty() {
+        // An abort can come after entries already moved: log them first.
+        lanelog::end(cfg, "");
         shell::audit(cfg, &format!("ABORT {op}: {msg}"));
     }
     std::process::exit(1);
