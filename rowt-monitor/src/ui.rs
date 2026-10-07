@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, ServerMode};
 use crate::model::{ErrCat, Lane, Window};
 use crate::paint::{dw, hfill, put, put_right, truncate};
 use crate::{format, theme};
@@ -23,6 +23,8 @@ pub struct Hit {
     pub err_h: usize,
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
+    pub strip_render_off: usize,
+    pub strip_pin: Option<usize>,
     pub strip_w: u16,
     pub strip_rows: usize,
     pub strip_page: usize,
@@ -85,8 +87,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     let col_y = cross_y + 1;
     let list_y = col_y + 1;
     let bottom = y0 + h - 1; // frame bottom ╰──╯
-    let server_rows = app.server_rows(w.saturating_sub(4));
-    let server_h = if h < 20 { 1 }
+    let server_rows = if app.server_mode == ServerMode::List { app.server_rows(w.saturating_sub(4)) } else { Vec::new() };
+    let server_h = if app.server_mode == ServerMode::Scroll || h < 20 { 1 }
         else if compact { server_rows.len().min(2) }
         else { server_rows.len().min(2).min(h.saturating_sub(19) as usize).max(1) };
     let chips_y = bottom - server_h as u16;
@@ -175,7 +177,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     hit.strip_w = w.saturating_sub(4);
     hit.strip_rows = server_h;
     hit.strip_page = app.server_page(&server_rows, server_h);
-    hit.server_list = Rect::new(xl + 1, stats_y, w.saturating_sub(2), server_h as u16 + 1);
+    if app.server_mode == ServerMode::List {
+        hit.server_list = Rect::new(xl + 1, stats_y, w.saturating_sub(2), server_h as u16 + 1);
+    }
     draw_health(buf, xl, xr, div, merge_y, stats_y, chips_y, app, present, border, &mut hit);
 
     // App-level drag selection highlight (secondary copy path).
@@ -828,7 +832,9 @@ fn draw_health(
     };
     let age = app.snap.probe_age.map_or_else(|| "—".to_string(),
         |secs| format!("{} ago", format::age_short(secs)));
-    let caption = truncate(&format!("server health · probe {age}"), xr - xl - 7);
+    // Frozen scroll captures keep their original caption; live views show probe age.
+    let caption = if present && app.server_mode == ServerMode::Scroll { "server health".to_string() }
+        else { truncate(&format!("server health · probe {age}"), xr - xl - 7) };
     let caption_x = if xr - div < dw(&caption) + 7 { xl } else { div };
     put(buf, caption_x + 1, merge_y, "─┤ ", border);
     put(buf, caption_x + 4, merge_y, &caption, cap);
@@ -861,15 +867,178 @@ fn draw_health(
     // flips.
     let stats = if w < 60 { format!("{} up {} down", s.servers_up, s.servers_down) }
         else { format!("{} servers · {} up · {} down", s.servers_total, s.servers_up, s.servers_down) };
-    let pages = app.server_rows(hit.strip_w).len().div_ceil(hit.strip_rows);
+    let pages = if app.server_mode == ServerMode::List { app.server_rows(hit.strip_w).len().div_ceil(hit.strip_rows) } else { 1 };
     let page = if pages > 1 { format!("↑↓ {}/{}", hit.strip_page + 1, pages) } else { String::new() };
     let stats_x = x0 + 1 + dw("auto off") + 3;
     let stats_w = (xr - 1).saturating_sub(stats_x + dw(&page) + if page.is_empty() { 0 } else { 2 });
     put(buf, stats_x, stats_y, &truncate(&stats, stats_w), theme::fg(theme::dim()));
     put_right(buf, xr - 2, stats_y, &page, theme::fg(theme::dim()));
 
-    draw_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit);
+    match app.server_mode {
+        ServerMode::Scroll => draw_scroll_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit),
+        ServerMode::List => draw_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit),
+    }
 }
+
+/// Draw the server strip. When a chip is selected the marquee is frozen: the ring
+/// is rendered at `app.strip_off` (the exact cell offset it had when frozen, so it
+/// doesn't jump — a partial chip may sit at the left edge) and scrolls only to
+/// keep the selection visible (`App::reveal_strip`); otherwise it marquees. In
+/// marquee mode the **active `▶` chip is pinned** at the strip's left edge and only
+/// the rest of the pool scrolls past it (see `PIN_SEP` / `MIN_RING_W`).
+fn draw_scroll_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool, hit: &mut Hit) {
+    let bright = theme::fg(theme::bright());
+    let escape = theme::fg(theme::escape());
+    let sel = if !present && app.focus == Focus::Health { app.strip_sel } else { None };
+    // Each chip is a run of styled segments. The active server leads with a ▶;
+    // the *selected* chip (frozen strip) is tinted amber + selection background.
+    let chips: Vec<Vec<(String, Style)>> = app
+        .snap
+        .chips
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let picked = sel == Some(i);
+            let bg = |st: Style| if picked { st.bg(theme::selection_bg()) } else { st };
+            // No reading yet — auto's pick before its first probe — reads `—`,
+            // the same as the header's latency without one.
+            let (ms, lat) = match (c.down, c.ms) {
+                (true, _) => ("down".to_string(), bg(theme::fg(theme::dim()))),
+                (false, Some(v)) => (format!("{:>3} ms", v), bg(theme::fg(theme::latency_color(v)))),
+                (false, None) => ("—".to_string(), bg(theme::fg(theme::dim()))),
+            };
+            let name_st = if picked {
+                bg(theme::bold(theme::armed()))
+            } else if c.active {
+                theme::bold(theme::escape())
+            } else {
+                bright
+            };
+            if c.active {
+                vec![("▶ ".to_string(), bg(escape)), (c.name.clone(), name_st), (" ".to_string(), bg(bright)), (ms, lat)]
+            } else {
+                vec![(c.name.clone(), name_st), (" ".to_string(), bg(bright)), (ms, lat)]
+            }
+        })
+        .collect();
+    if chips.is_empty() {
+        return;
+    }
+    let widths: Vec<u16> = chips.iter().map(|segs| segs.iter().map(|(s, _)| dw(s)).sum()).collect();
+    let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
+
+    // Whole pool fits (static left-to-right layout, whether or not selected).
+    if present || total <= w {
+        hit.strip_render_off = 0; // static: everything starts at column 0
+        hit.strip_pin = None; // nothing scrolls, so nothing needs pinning
+        let mut col = x0;
+        for (i, segs) in chips.iter().enumerate() {
+            let sep = if i > 0 { 3 } else { 0 };
+            if col + sep + widths[i] > x0 + w {
+                break;
+            }
+            col += sep;
+            hit.chips.push((Rect::new(col, y, widths[i], 1), i));
+            for (s, st) in segs {
+                put(buf, col, y, s, *st);
+                col += dw(s);
+            }
+        }
+        hover_chip(buf, app, present, hit);
+        return;
+    }
+
+    // The pool overflows, so it scrolls — pin the active `▶` chip at the left edge
+    // (it's the one you most want in view) and marquee only the rest past it, in
+    // whatever width is left over. Skipped when that would leave too little room to
+    // scroll in (narrow terminal / long active name), which keeps the old behaviour.
+    let pin = app
+        .snap
+        .chips
+        .iter()
+        .position(|c| c.active)
+        .filter(|&i| widths[i] + PIN_SEP + MIN_RING_W <= w);
+    hit.strip_pin = pin;
+    let pin_w = pin.map_or(0, |i| widths[i] + PIN_SEP);
+    let rx = x0 + pin_w; // ring viewport origin
+    let rw = w - pin_w; // ring viewport width — what App freezes/scrolls against
+    hit.strip_w = rw;
+    if let Some(i) = pin {
+        let mut col = x0;
+        for (s, st) in &chips[i] {
+            put(buf, col, y, s, *st);
+            col += dw(s);
+        }
+        hit.chips.push((Rect::new(x0, y, widths[i], 1), i));
+        put(buf, col + 1, y, "│", theme::fg(theme::border())); // ` │ ` seam: the pin doesn't move
+    }
+
+    // Ring: one cell buffer (chips + 3-cell separators), rendered at a cell offset.
+    // Frozen at `app.strip_off` when a chip is selected, else the time-based marquee.
+    let mut cells: Vec<(char, Style)> = Vec::new();
+    let mut ring: Vec<(usize, usize)> = Vec::with_capacity(chips.len()); // (chip index, start cell)
+    for (i, segs) in chips.iter().enumerate() {
+        if pin == Some(i) {
+            continue; // pinned: drawn above, outside the ring
+        }
+        if !cells.is_empty() {
+            cells.extend([(' ', Style::default()); 3]);
+        }
+        ring.push((i, cells.len()));
+        for (s, st) in segs {
+            cells.extend(s.chars().map(|c| (c, *st)));
+        }
+    }
+    let span = cells.len() + 3;
+    let mut off = match sel {
+        Some(_) => app.strip_off % span,
+        // Marquee off a resettable baseline (not raw elapsed) so it resumes from
+        // the frozen offset after unfreezing instead of jumping.
+        None => (app.marquee_off0 + (app.marquee_t0.elapsed().as_secs_f32() * MARQUEE_CPS) as usize) % span,
+    };
+    if app.strip_reveal || (app.strip_w != u16::MAX && (rw != app.strip_w || pin != app.strip_pin)) {
+        if let Some(i) = sel.filter(|&i| pin != Some(i)) {
+            if let Some(&(_, start)) = ring.iter().find(|&&(j, _)| j == i) {
+                let col = (start + span - off) % span;
+                if col + (widths[i] as usize).min(rw as usize) > rw as usize { off = start; }
+            }
+        }
+    }
+    hit.strip_render_off = off; // freezing captures exactly this, so the view can't jump
+    for k in 0..rw as usize {
+        let ci = (off + k) % span;
+        let (ch, st) = if ci < cells.len() { cells[ci] } else { (' ', Style::default()) };
+        let mut b = [0u8; 4];
+        put(buf, rx + k as u16, y, ch.encode_utf8(&mut b), st);
+    }
+    // Record each on-screen chip's rect so a click can select it — including the
+    // two edge chips that are only *partially* visible: the last one (clipped on
+    // the right) and the first one (clipped on the left, its left edge scrolled
+    // off, so its right portion shows from the ring's column 0).
+    let wu = rw as usize;
+    for &(i, st) in &ring {
+        let wd = widths[i] as usize;
+        let kl = (st + span - off % span) % span; // display col of the chip's left edge
+        let (cx, cw) = if kl < wu {
+            (kl, wd.min(wu - kl)) // left edge on screen (may be right-clipped)
+        } else if st < off && off < st + wd {
+            (0, (st + wd - off).min(wu)) // left-clipped: right part shows from col 0
+        } else {
+            continue;
+        };
+        if cw > 0 {
+            hit.chips.push((Rect::new(rx + cx as u16, y, cw as u16, 1), i));
+        }
+    }
+    hover_chip(buf, app, present, hit);
+}
+
+/// Cells between the pinned active chip and the scrolling ring — the same 3-cell
+/// gap chips use between themselves, drawn as ` │ ` so the seam reads as fixed.
+const PIN_SEP: u16 = 3;
+/// Don't pin unless at least this much width is left for the ring to scroll in;
+/// below it the pin would swallow the strip, so the whole pool marquees instead.
+const MIN_RING_W: u16 = 12;
 
 /// Render whole servers left-to-right, then top-to-bottom, on a manual page.
 fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool, hit: &mut Hit) {
@@ -904,6 +1073,9 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 Span::styled(ms, bg(theme::fg(color))),
             ]);
             buf.set_line(end, cy, &latency, width.saturating_sub(end - x));
+            if c.active && app.snap.chips.len() > 1 && x + width + PIN_SEP <= x0 + w {
+                put(buf, x + width + 1, cy, "│", theme::fg(theme::border()));
+            }
             hit.chips.push((Rect::new(x, cy, width, 1), i));
             x += width + 3;
         }
@@ -1013,6 +1185,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "             (x.y.z.com → z.com)",
         "             after ½s the entry turns editable:",
         "             type · ^w drop leading label · ↵ apply",
+        "  g          servers: scroll / list",
         "  u          use the selected server",
         "  a          auto server selection on/off",
         "             (off pins the server in use)",
@@ -1144,14 +1317,15 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     // Normal: global group, then a contextual group when something is live.
-    let global = if area.width < 96 {
-        if app.focus == Focus::Health { "Tab ↑↓ page ←→ pick u use q quit" }
-        else { " Tab pane · ↑↓ move · ? help · q quit " }
-    } else if app.paused {
-        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · p resume · ? help · q quit "
+    let global = if app.paused {
+        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · p resume · g servers · ? help · q quit "
     } else {
-        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · p pause · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · p pause · g servers · ? help · q quit "
     };
+    let global = if area.width < dw(global) {
+        if app.focus == Focus::Health && app.server_mode == ServerMode::List { "↑↓ page · g servers · ? help · q quit" }
+        else { "Tab pane · g servers · ? help · q quit" }
+    } else { global };
     let shown = truncate(global, area.width);
     put(buf, left, y, &shown, dimmer);
     let mut x = left + dw(&shown);
@@ -1163,7 +1337,8 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
         Focus::Conn if app.conn_active() => Some("e·c·b·d route (⇧ = suffix) · y copy ".to_string()),
         Focus::Err if app.err_active() => Some("e·c·b·d route (⇧ = suffix) · y copy ".to_string()),
         Focus::Health => match app.strip_sel.and_then(|i| app.snap.chips.get(i)) {
-            None => Some("←→ select · ↑↓ page ".to_string()),
+            None if app.server_mode == ServerMode::List => Some("←→ select · ↑↓ page ".to_string()),
+            None => Some("←→ select ".to_string()),
             // In auto mode `u` pins any chip — auto's own pick included — and
             // that turns auto off.
             Some(s) if app.auto_display() => Some(format!("u pin {} ", s.name)),

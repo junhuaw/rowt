@@ -141,7 +141,7 @@ impl Source for FixtureSource {
             err(8, ErrKind::Timeout, "rr5.googlevideo.com"),
         ];
 
-        // The complete probed pool: 9 up (including active) and 1 down.
+        // The original capture contains nine healthy servers, including the active one.
         let chips = vec![
             Server { down: false, name: "JP-Tokyo".into(), ms: Some(42), active: true },
             Server { down: false, name: "JP-Osaka".into(), ms: Some(175), active: false },
@@ -152,7 +152,6 @@ impl Source for FixtureSource {
             Server { down: false, name: "TW-Taipei".into(), ms: Some(110), active: false },
             Server { down: false, name: "US-LA".into(), ms: Some(151), active: false },
             Server { down: false, name: "NL-Ams".into(), ms: Some(68), active: false },
-            Server { down: true, name: "US-NY".into(), ms: None, active: false },
         ];
 
         Snapshot {

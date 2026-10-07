@@ -14,6 +14,7 @@ Invoked as `rowt monitor`; also runs standalone as `rowt-monitor`.
 ```sh
 rowt-monitor              # live TUI (falls back to a demo fixture when the
                           # proxy / clash API isn't reachable)
+rowt-monitor --servers list   # start with a two-row paged server list
 rowt-monitor --fixtures   # force the offline demo data
 rowt-monitor --render 150x38   # print one frame as plain text (dev/testing)
 ```
@@ -22,7 +23,7 @@ rowt-monitor --render 150x38   # print one frame as plain text (dev/testing)
 
 **Navigate:** `↑↓`/`jk` move (first press locks a row by domain; leaving a pane
 forgets it) · `←→`/`hl` switch pane / pick a server chip · `Tab` cycle focus
-(conns → errors → health) · `v` flip the connections pane (live / ↑ upload /
+(conns → errors → health) · `g` toggle servers: scroll / list · `v` flip the connections pane (live / ↑ upload /
 ↓ download history) · `s` span (metrics timescale band) · `f` lane filter
 (`1`/`2`/`3` jump, `0` clear) · `/` search hosts (regex, filters both panes;
 `↵` commit, `esc` clear) · `w` or `[`/`]` errors window · `y` yank selected
@@ -147,22 +148,28 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
   presenting a days-old binary as current.
 - **`live connections`** and **`errors & blocked`** panes — side by side,
   split by a center rule (tab labels shorten on narrow terminals).
-- Full-width **`server health`** list, merged onto the closing `┴` rule. The row
-  above it leads with the **`auto` on/off toggle**, then pool counts and, when
-  needed, a page counter. The active `▶` server comes first; remaining entries
-  sort by latency ascending (unknown after known, equal latencies by name),
-  with failed servers marked `down` at the end.
-  All pool members appear immediately, even before probing or while the router
-  is down. Pending readings show `—` and do not count as up or down.
-  Down servers can be selected but cannot be switched to with `u`.
-  Entries wrap automatically and occupy at most **two rows**.
-  The active server stays first even if its probe fails. There is no
-  automatic scrolling. Focus with `Tab`; `←→` selects servers, while `↑↓`/`jk`,
-  `PgUp`/`PgDn`, or the wheel over the list changes pages. Selection follows the
-  server name across probe refreshes, and selecting across a page boundary reveals
-  that server. Names too wide for a whole row are clipped at the right edge, without an
-  ellipsis or a suffix from the end of the name; latency remains visible.
-  Switching servers always uses the full name.
+- Full-width **`server health`**, merged onto the closing `┴` rule. The row
+  above it leads with the **`auto` on/off toggle**, then pool counts.
+  **Scroll is the default:** the original single-row marquee, with the active
+  `▶` server pinned when there is room and the connection/error pane heights
+  unchanged. Selecting a chip freezes the strip; `Esc` resumes it, and `↑`
+  returns to the connections pane.
+  Press **`g`** to toggle between scroll and list,
+  or start with **`--servers scroll|list`**. Switching modes keeps the selected
+  server. The mode key is also shown in `?` help and the footer.
+  **List mode** wraps entries across at most **two rows**, without automatic
+  scrolling. The active server comes first, followed by a `│` separator when
+  space allows, even if its probe fails; remaining
+  entries sort by latency ascending (unknown after known, ties by name), with
+  failed servers marked `down` at the end. Focus with `Tab`; `←→` selects, while
+  `↑↓`/`jk`, `PgUp`/`PgDn`, or the wheel over the list changes pages. The page
+  counter appears beside the pool counts. Selecting across a page boundary
+  reveals that server. Names too wide for a row are clipped at the right edge,
+  without a middle ellipsis; latency remains visible.
+  In both modes, all pool members are available immediately, even before
+  probing or while the router is down. Pending readings show `—` and do not
+  count as up or down. Down servers can be selected but cannot be used with `u`.
+  Selection follows the name across refreshes; switching servers uses the full name.
   Each probe round measures every node three times, with at most 10 nodes
   being tested concurrently. Each finished node publishes its result immediately
   and frees a slot for the next node, without waiting for other nodes.
@@ -175,7 +182,8 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
 
 The interactive layout supports **40 columns × 12 rows** (including the footer).
 Small windows use a compact header and fewer table columns, keeping the two
-panes side by side. Below 21 rows, the server list uses one row with paging;
+panes side by side. Scroll mode always uses one server row. In list mode,
+below 21 rows the server list uses one row with paging;
 taller windows show up to two rows as needed. Below 40×12, a resize hint
 replaces the layout; expanding the terminal restores the display and server page.
 
@@ -203,7 +211,11 @@ Everything is derived on a 2-second tick from: the clash API
 The layout and 130-column reflow reproduce the `.txt` captures byte-for-byte in
 width. `tests/golden.rs` renders each geometry via ratatui's `TestBackend` and
 diffs against them, masking the deliberate deviations; `--render WxH` is the
-same path exposed on the CLI.
+same path exposed on the CLI. The original scrolling goldens are unchanged.
+List mode has separate `renders/rowt-monitor-list-*` captures and checks in
+`tests/server_modes.rs`; generate them with `--servers list --render WxH` or
+`--servers list --theme dark|light --render-ansi WxH`. The legacy filename sizes
+map to actual render sizes 96×41, 150×30, and 212×30.
 
 ## Themes
 

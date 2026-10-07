@@ -220,6 +220,23 @@ pub struct Search {
     pub changed_at: Option<Instant>, // when the committed pattern last changed (10s degrade)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerMode {
+    #[default]
+    Scroll,
+    List,
+}
+
+impl ServerMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "scroll" => Some(Self::Scroll),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
 /// One interaction, decoded from a key or mouse event (see `input.rs`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -265,6 +282,7 @@ pub enum Action {
     ScrollConn(i8),
     ScrollErr(i8),
     PageServers(i8),
+    ToggleServers,
     SelectConn(usize), // absolute index in the filtered view
     SelectErr(usize),
     SelectServer(usize), // click a server chip: focus the strip + select it in place
@@ -302,8 +320,15 @@ pub struct App {
     pub conn_key: Option<String>,
     pub err_key: Option<String>,
 
-    // Selection indexes the snapshot; display order is active first, then latency.
+    // Selection indexes the snapshot in either server display mode.
     pub strip_sel: Option<usize>,
+    pub server_mode: ServerMode,
+    pub strip_off: usize,
+    pub strip_render_off: usize,
+    pub strip_pin: Option<usize>,
+    pub marquee_off0: usize,
+    pub marquee_t0: Instant,
+    pub strip_reveal: bool,
     pub strip_page: usize,
     pub strip_w: u16,
     pub strip_rows: usize,
@@ -370,6 +395,13 @@ impl App {
             conn_key: None,
             err_key: None,
             strip_sel: None,
+            server_mode: ServerMode::Scroll,
+            strip_off: 0,
+            strip_render_off: 0,
+            strip_pin: None,
+            marquee_off0: 0,
+            marquee_t0: Instant::now(),
+            strip_reveal: false,
             strip_page: 0,
             strip_w: u16::MAX,
             strip_rows: 2,
@@ -537,6 +569,13 @@ impl App {
             Quit => self.should_quit = true,
             ToggleHelp => self.help = !self.help,
             TogglePause => self.paused = !self.paused,
+            ToggleServers => {
+                self.server_mode = match self.server_mode {
+                    ServerMode::Scroll => ServerMode::List,
+                    ServerMode::List => ServerMode::Scroll,
+                };
+                self.strip_reveal = true;
+            },
             ForceProbe => {
                 let message = match self.source.force_probe() {
                     Ok(()) => "re-probing servers…",
@@ -616,8 +655,10 @@ impl App {
                 self.set_err_index(i.min(self.err_len().saturating_sub(1)));
             }
             PageServers(d) => {
-                self.set_focus(Focus::Health);
-                self.page_servers(d as i32);
+                if self.server_mode == ServerMode::List {
+                    self.set_focus(Focus::Health);
+                    self.page_servers(d as i32);
+                }
             }
             SelectServer(i) => self.select_server(i),
             SearchOpen => self.search_open(),
@@ -774,12 +815,16 @@ impl App {
         self.err_key = None;
     }
 
-    /// Click a server without changing its position in the latency-sorted list.
+    /// Click a server in place, freezing the marquee when in scroll mode.
     fn select_server(&mut self, i: usize) {
         if i >= self.snap.chips.len() {
             return;
         }
         self.set_focus(Focus::Health);
+        if self.server_mode == ServerMode::Scroll && self.strip_sel.is_none() {
+            let (_, _, span) = self.strip_layout();
+            self.strip_off = self.strip_render_off % span.max(1);
+        }
         self.strip_sel = Some(i);
     }
 
@@ -800,7 +845,10 @@ impl App {
     }
 
     fn clear_strip(&mut self) {
-        self.strip_sel = None;
+        if self.strip_sel.take().is_some() {
+            self.marquee_off0 = self.strip_off;
+            self.marquee_t0 = Instant::now();
+        }
     }
 
     fn cycle_focus(&mut self, d: i8) {
@@ -1077,6 +1125,12 @@ impl App {
         self.strip_w = hit.strip_w;
         self.strip_rows = hit.strip_rows.max(1);
         self.strip_page = hit.strip_page;
+        self.strip_render_off = hit.strip_render_off;
+        self.strip_pin = hit.strip_pin;
+        if self.server_mode == ServerMode::Scroll && self.strip_sel.is_some() {
+            self.strip_off = hit.strip_render_off;
+        }
+        self.strip_reveal = false;
     }
 
     pub fn server_order(&self) -> Vec<usize> {
@@ -1133,6 +1187,10 @@ impl App {
     }
 
     fn strip_move(&mut self, d: i32) {
+        if self.server_mode == ServerMode::Scroll {
+            self.scroll_strip_move(d);
+            return;
+        }
         let order = self.server_order();
         if order.is_empty() { return; }
         self.strip_sel = Some(match self.strip_sel.and_then(|i| order.iter().position(|&j| i == j)) {
@@ -1142,6 +1200,109 @@ impl App {
                 rows[self.server_page(&rows, self.strip_rows) * self.strip_rows.max(1)][0]
             }
         });
+    }
+
+    fn scroll_strip_move(&mut self, d: i32) {
+        let n = self.snap.chips.len();
+        if n == 0 {
+            return;
+        }
+        match self.strip_sel {
+            // First ←/→ freezes the marquee at the EXACT offset the renderer last
+            // drew (fed back as `strip_render_off`), so the frozen view is the
+            // snapshot on screen — a partial chip may remain at the left edge, and
+            // nothing jumps. Then select the first fully-visible chip.
+            None => {
+                let (starts, widths, span) = self.strip_layout();
+                self.strip_off = self.strip_render_off % span.max(1);
+                self.strip_sel = Some(self.first_fully_visible(&starts, &widths, span, self.strip_off));
+            }
+            // Subsequent moves wrap around the ends; scroll the frozen ring (in the
+            // move direction) just enough to keep the selection fully visible.
+            Some(i) => {
+                let ni = (i as i32 + d).rem_euclid(n as i32) as usize;
+                self.strip_sel = Some(ni);
+                self.reveal_strip(ni, d);
+            }
+        }
+    }
+
+    /// Cell width of server chip `i`, matching the scrolling cell buffer.
+    fn chip_w(&self, i: usize) -> u16 {
+        match self.snap.chips.get(i) {
+            Some(c) => {
+                let latency = if c.down { "down".to_string() }
+                    else { c.ms.map_or_else(|| "—".to_string(), |v| format!("{v:>3} ms")) };
+                (c.name.chars().count() + 1 + latency.chars().count() + if c.active { 2 } else { 0 }) as u16
+            }
+            None => 0,
+        }
+    }
+
+    /// The strip's ring layout: each chip's start cell, its width, and the total
+    /// ring span (chips + 3-cell separators + a 3-cell trailing gap), mirroring the
+    /// marquee cell buffer in `draw_chips`. The **pinned** chip is held outside the
+    /// ring by the renderer, so its start is `None` and it contributes no cells.
+    fn strip_layout(&self) -> (Vec<Option<usize>>, Vec<u16>, usize) {
+        let n = self.snap.chips.len();
+        let mut starts = Vec::with_capacity(n);
+        let mut widths = Vec::with_capacity(n);
+        let mut cells = 0usize;
+        for i in 0..n {
+            let w = self.chip_w(i);
+            widths.push(w);
+            if self.strip_pin == Some(i) {
+                starts.push(None);
+                continue;
+            }
+            if cells > 0 {
+                cells += 3;
+            }
+            starts.push(Some(cells));
+            cells += w as usize;
+        }
+        (starts, widths, cells + 3)
+    }
+
+    /// Display column of chip `i`'s left edge within the ring window at offset
+    /// `off`; `None` for the pinned chip, which isn't in the ring at all.
+    fn chip_col(&self, starts: &[Option<usize>], span: usize, off: usize, i: usize) -> Option<usize> {
+        starts[i].map(|st| (st + span - off % span) % span)
+    }
+
+    /// The first chip fully inside the viewport at offset `off` (what the first
+    /// ←/→ selects); falls back to chip 0 if none fits. The pinned chip wins
+    /// outright — it's held at the strip's left edge, so it's both always fully
+    /// visible and the leftmost one on screen.
+    fn first_fully_visible(&self, starts: &[Option<usize>], widths: &[u16], span: usize, off: usize) -> usize {
+        if let Some(p) = self.strip_pin.filter(|&p| p < widths.len()) {
+            return p;
+        }
+        let mut best: Option<(usize, usize)> = None; // (left column, index)
+        for (i, &wd) in widths.iter().enumerate() {
+            let Some(col) = self.chip_col(starts, span, off, i) else { continue };
+            if col + wd as usize <= self.strip_w as usize && best.is_none_or(|(c, _)| col < c) {
+                best = Some((col, i));
+            }
+        }
+        best.map(|(_, i)| i).unwrap_or(0)
+    }
+
+    /// Scroll the frozen ring one cell at a time in the move direction `d` until
+    /// the selected chip is fully visible (bounded by the ring span). The pinned
+    /// chip never scrolls — it's already on screen — so it's a no-op there.
+    fn reveal_strip(&mut self, si: usize, d: i32) {
+        let (starts, widths, span) = self.strip_layout();
+        if span == 0 || self.strip_w == 0 || starts[si].is_none() {
+            return;
+        }
+        for _ in 0..span {
+            match self.chip_col(&starts, span, self.strip_off, si) {
+                Some(col) if col + widths[si] as usize <= self.strip_w as usize => return,
+                _ => {}
+            }
+            self.strip_off = if d >= 0 { (self.strip_off + 1) % span } else { (self.strip_off + span - 1) % span };
+        }
     }
 
     /// `w` / `[` / `]` — cycle the errors pane's rolling window. Global (focus-
@@ -1288,7 +1449,10 @@ impl App {
 
     fn move_sel(&mut self, d: i32) {
         match self.focus {
-            Focus::Health => self.page_servers(d),
+            Focus::Health => {
+                if self.server_mode == ServerMode::List { self.page_servers(d); }
+                else if d < 0 { self.set_focus(Focus::Conn); }
+            }
             Focus::Conn => {
                 let len = self.conn_len();
                 if len == 0 {

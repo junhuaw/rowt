@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::app::{Action, App, Armed, Edit};
+use crate::app::{Action, App, Armed, Edit, ServerMode};
 use crate::model::Lane;
 use crate::ui::Hit;
 
@@ -59,8 +59,8 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Left | KeyCode::Char('h') => Action::FocusLeft,
         KeyCode::Right | KeyCode::Char('l') => Action::FocusRight,
-        KeyCode::PageUp if app.focus == crate::app::Focus::Health => Action::PageServers(-1),
-        KeyCode::PageDown if app.focus == crate::app::Focus::Health => Action::PageServers(1),
+        KeyCode::PageUp if app.focus == crate::app::Focus::Health && app.server_mode == ServerMode::List => Action::PageServers(-1),
+        KeyCode::PageDown if app.focus == crate::app::Focus::Health && app.server_mode == ServerMode::List => Action::PageServers(1),
         KeyCode::Tab => Action::CycleFocus,
         KeyCode::BackTab => Action::CycleFocusBack,
         KeyCode::Char('f') => Action::LaneCycle,
@@ -68,6 +68,7 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('2') => Action::LaneSet(Some(Lane::Corp)),
         KeyCode::Char('3') => Action::LaneSet(Some(Lane::Direct)),
         KeyCode::Char('0') => Action::LaneSet(None),
+        KeyCode::Char('g') => Action::ToggleServers,
         KeyCode::Char('v') => Action::ConnViewCycle,
         KeyCode::Char('s') => Action::BandCycle,
         KeyCode::Char('w') => Action::WindowCycle,

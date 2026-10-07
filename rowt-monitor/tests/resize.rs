@@ -1,5 +1,5 @@
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
-use rowt_monitor::{app::{Action, App, Focus}, model::Server, source::FixtureSource, ui};
+use rowt_monitor::{app::{Action, App, Focus, ServerMode}, model::Server, source::FixtureSource, ui};
 
 fn frame(term: &mut Terminal<TestBackend>, app: &mut App, w: u16, h: u16) -> ui::Hit {
     term.backend_mut().resize(w, h);
@@ -18,6 +18,7 @@ fn frame(term: &mut Terminal<TestBackend>, app: &mut App, w: u16, h: u16) -> ui:
 #[test]
 fn resizing_to_a_narrow_terminal_and_back_does_not_crash() {
     let mut app = App::new(Box::new(FixtureSource::still()));
+    app.server_mode = ServerMode::List;
     let mut term = Terminal::new(TestBackend::new(150, 30)).unwrap();
     for (w, h) in [(150, 30), (50, 30), (8, 30), (1, 1), (0, 0), (96, 30), (150, 30)] {
         frame(&mut term, &mut app, w, h);
@@ -31,6 +32,7 @@ fn shrinking_height_to_zero_and_back_respects_the_minimum_size() {
     let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
     for width in [96, 150, 212] {
         let mut app = App::new(Box::new(FixtureSource::still()));
+        app.server_mode = ServerMode::List;
         app.update(Action::SelectServer(2));
         let selected = app.snap.chips[2].name.clone();
         for height in (0..=40).rev().chain(0..=40) {
@@ -54,6 +56,7 @@ fn shrinking_height_to_zero_and_back_respects_the_minimum_size() {
 fn small_windows_keep_the_existing_tables_and_servers_usable() {
     let mut term = Terminal::new(TestBackend::new(96, 30)).unwrap();
     let mut app = App::new(Box::new(FixtureSource::still()));
+    app.server_mode = ServerMode::List;
     for _ in 0..3 {
         for (w, h) in [(40, 12), (40, 30), (60, 15), (80, 15), (80, 20), (150, 12)] {
             let hit = frame(&mut term, &mut app, w, h);
@@ -75,6 +78,7 @@ fn small_windows_keep_the_existing_tables_and_servers_usable() {
 fn server_list_uses_one_row_only_when_height_is_limited() {
     let mut term = Terminal::new(TestBackend::new(40, 30)).unwrap();
     let mut app = App::new(Box::new(FixtureSource::still()));
+    app.server_mode = ServerMode::List;
     let tall = frame(&mut term, &mut app, 40, 30);
     assert_eq!(tall.strip_rows, 2);
     let short = frame(&mut term, &mut app, 40, 12);
@@ -93,6 +97,7 @@ fn tiny_resize_is_safe_in_all_views_and_footer_states() {
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     for state in 0..6 {
         let mut app = App::new(Box::new(FixtureSource::still()));
+        app.server_mode = ServerMode::List;
         match state {
             1 => app.update(Action::ConnViewCycle),
             2 => { app.update(Action::ConnViewCycle); app.update(Action::ConnViewCycle); }
@@ -112,6 +117,7 @@ fn tiny_resize_is_safe_in_all_views_and_footer_states() {
 #[test]
 fn undersized_window_shows_hint_and_preserves_server_page() {
     let mut app = App::new(Box::new(FixtureSource::still()));
+    app.server_mode = ServerMode::List;
     app.snap.chips = (0..20).map(|i| Server {
         down: false,
         name: format!("server-{i:02}-with-a-long-name-that-occupies-most-of-a-row"), ms: Some(i), active: false,

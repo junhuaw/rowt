@@ -20,7 +20,8 @@ const G212: &str = include_str!("../renders/rowt-monitor-212x52.txt");
 /// design capture, so the byte-exact diff still verifies everything else
 /// (panes, columns, borders, reflow). Masked: the identity band (rows 1..=4) —
 /// the logo art (bottom row shifted left one) and the right fact column (moved
-/// right for breathing room). Server-health rows are checked without a mask.
+/// right for breathing room); and the two server-health content rows (stats no
+/// longer repeats the active server; the strip marks the active with a ▶).
 /// The masked behaviours have their own dedicated assertions below.
 /// Neutralize the per-row ↑/↓ in the connections *table* (removed as redundant
 /// with the UP/DOWN column headers): a table arrow is one immediately followed
@@ -43,10 +44,12 @@ fn strip_table_arrows(s: &str) -> String {
 fn mask(s: &str) -> String {
     let s = strip_table_arrows(s);
     let lines: Vec<&str> = s.lines().collect();
+    let n = lines.len();
     lines
         .iter()
         .enumerate()
         .map(|(i, line)| {
+            let health = n >= 4 && (i == n - 4 || i == n - 3); // stats + chips rows
             if i == 4 {
                 // proxy/config row diverges (proxy = system-proxy on/off, no iface)
                 " ".repeat(line.chars().count())
@@ -57,6 +60,8 @@ fn mask(s: &str) -> String {
                     .enumerate()
                     .map(|(c, ch)| if (1..=27).contains(&c) || c >= 46 { ' ' } else { ch })
                     .collect::<String>()
+            } else if health {
+                " ".repeat(line.chars().count())
             } else {
                 line.to_string()
             }
@@ -212,6 +217,120 @@ fn footer_search_indicator_after_commit() {
     assert!(footer.contains("/ search"), "the / search hint stays on the left: {footer:?}");
     let (n, m) = app.search_counts();
     assert!(footer.contains(&format!("({n}/{m})")), "indicator shows the n/m match count: {footer:?}");
+}
+
+#[test]
+fn selected_server_strip_fills_row_circularly() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    // First draw feeds back the strip geometry (needed for circular paging).
+    let mut hit = ui::Hit::default();
+    term.draw(|f| {
+        let a = f.area();
+        hit = ui::draw(f.buffer_mut(), a, &app, false);
+    })
+    .unwrap();
+    app.feed_strip(&hit);
+    app.side_by_side = false;
+    // Focus the strip and select a chip partway down the (overflowing) pool. The
+    // first ←/→ lands on the pinned (active) chip, so 6 presses reach index 5.
+    app.focus = Focus::Health;
+    for _ in 0..6 {
+        app.update(Action::FocusRight);
+    }
+    assert_eq!(app.strip_sel, Some(5));
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw(f.buffer_mut(), a, &app, false);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    // The chips row is the one just below the "N servers · …" stats line.
+    let stats = (0..h).find(|&yy| row_text(buf, w, yy).contains("servers ·")).expect("stats row");
+    let chips_y = stats + 1;
+    // The selected server is visible…
+    let name = &app.snap.chips[5].name;
+    assert!(row_text(buf, w, chips_y).contains(name.as_str()), "selected chip visible: {:?}", row_text(buf, w, chips_y));
+    // …and the frozen ring fills the right side of the row (wraps past the end),
+    // rather than leaving it blank as a stop-at-list-end pager would.
+    let filled_right = (w / 2..w - 3).filter(|&x| buf.cell((x, chips_y)).map(|c| c.symbol().trim() != "").unwrap_or(false)).count();
+    assert!(filled_right > 10, "strip wraps to fill the row's right side ({filled_right} cells)");
+}
+
+#[test]
+fn both_partial_edge_chips_are_clickable() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let mut hit = ui::Hit::default();
+    term.draw(|f| {
+        let a = f.area();
+        hit = ui::draw(f.buffer_mut(), a, &app, false);
+    })
+    .unwrap();
+    app.feed_strip(&hit);
+    app.side_by_side = false;
+    app.focus = Focus::Health;
+    // Freeze the ring scrolled a few cells in, so the first *ring* chip (index 1 —
+    // index 0 is pinned outside the ring) is clipped on its left edge and the last
+    // visible chip is clipped on its right edge.
+    app.strip_sel = Some(2);
+    app.strip_off = 4;
+    let mut chips = Vec::new();
+    term.draw(|f| {
+        let a = f.area();
+        chips = ui::draw(f.buffer_mut(), a, &app, false).chips;
+    })
+    .unwrap();
+    assert!(chips.iter().any(|(_, i)| *i == 1), "the left-clipped first ring chip is clickable: {chips:?}");
+    // The pinned chip sits at the strip's left edge; the left-clipped ring chip
+    // starts right after it (pin + the 3-cell ` │ ` seam), showing its right portion.
+    let (r0, _) = chips.iter().find(|(_, i)| *i == 0).expect("the pinned chip is clickable");
+    let (r1, _) = chips.iter().find(|(_, i)| *i == 1).unwrap();
+    assert_eq!(r1.x, r0.x + r0.width + 3, "left-clipped chip anchored at the ring's left edge");
+}
+
+#[test]
+fn active_chip_is_pinned_while_the_ring_scrolls() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    app.focus = Focus::Health;
+    app.strip_sel = Some(1); // freeze the ring so the offset is ours, not the clock's
+    // Snapshot the strip's left edge at two very different frozen ring offsets.
+    let shot = |term: &mut Terminal<TestBackend>, app: &App| -> (String, String, ui::Hit) {
+        let mut hit = ui::Hit::default();
+        term.draw(|f| {
+            let a = f.area();
+            hit = ui::draw(f.buffer_mut(), a, app, false);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let stats = (0..h).find(|&yy| row_text(buf, w, yy).contains("servers ·")).expect("stats row");
+        // The strip starts at column 2; `▶ JP-Tokyo  42 ms` is 17 cells, then the
+        // 3-cell ` │ ` seam, then the ring runs to the frame.
+        let row: Vec<char> = row_text(buf, w, stats + 1).chars().collect();
+        (row[2..19].iter().collect(), row[22..(w - 2) as usize].iter().collect(), hit)
+    };
+    app.strip_off = 0;
+    let (pin_a, ring_a, hit_a) = shot(&mut term, &app);
+    app.strip_off = 37;
+    let (pin_b, ring_b, _) = shot(&mut term, &app);
+    assert_eq!(hit_a.strip_pin, Some(0), "the active server is the pinned chip");
+    assert_eq!(hit_a.strip_w, 92 - 17 - 3, "the fed-back viewport is the *ring* width (strip − pin − seam)");
+    assert_eq!(pin_a, "▶ JP-Tokyo  42 ms", "the active chip is drawn at the strip's left edge: {pin_a:?}");
+    assert_eq!(pin_a, pin_b, "the pinned chip holds its cells while the ring scrolls under it");
+    assert_ne!(ring_a, ring_b, "…and the rest of the pool really did scroll between the two offsets");
 }
 
 #[test]
@@ -566,7 +685,8 @@ fn watch_cell_states_and_stale_monitor_notice() {
 }
 
 // ---- auto server selection: the toggle row above the strip ----
-// These assertions also check the server list in interactive auto mode.
+// The stats + chips rows are masked out of the frozen-capture diff above; these
+// are the dedicated assertions for what now lives there.
 
 /// Draw one interactive (non-present) frame; return the buffer, the hit map, and
 /// the row carrying the auto toggle + pool stats (the strip is the row below).
@@ -600,34 +720,29 @@ fn auto_toggle_leads_the_row_above_the_strip() {
     let fg = |x: u16| buf.cell((x, y)).unwrap().fg;
     assert_eq!(fg(2), theme::dimmer());
     assert_eq!(fg(7), theme::dim());
-    // The fixture's active server also happens to have the lowest latency.
+    // Directly below it, the pinned server still holds the strip's left edge.
     assert_eq!(cells(&buf, 96, y + 1, 2, 19), "▶ JP-Tokyo  42 ms");
 }
 
 #[test]
-fn in_auto_mode_the_toggle_reads_on_and_pick_leads_the_list() {
+fn in_auto_mode_the_toggle_reads_on_and_urltests_pick_holds_the_left() {
     let app = App::new(Box::new(Recording::new(Mode::Auto(Some("KR-Seoul")))));
     let (buf, hit, y) = stats_frame(&app, 96, 41);
     assert_eq!(cells(&buf, 96, y, 2, 9), "auto on");
     assert_eq!(buf.cell((7, y)).unwrap().fg, theme::direct(), "`on` is green, like every enabled toggle");
     assert_eq!(hit.auto, ratatui::layout::Rect::new(2, y, 7, 1));
-    let (rect, _) = hit.chips.iter().find(|(_, i)| app.snap.chips[*i].active).unwrap();
-    assert_eq!(cells(&buf, 96, rect.y, rect.x as usize, rect.right() as usize), "▶ KR-Seoul  72 ms");
-    assert_eq!(hit.chips[0].1, hit.chips.iter().find(|(_, i)| app.snap.chips[*i].active).unwrap().1,
-               "the active server leads even when another server is faster");
+    assert_eq!(cells(&buf, 96, y + 1, 2, 19), "▶ KR-Seoul  72 ms", "the server auto is using is pinned; the rest scroll");
     assert!(row_text(&buf, 96, 2).contains("KR-Seoul"), "and the header names it, not `auto`");
 }
 
 #[test]
-fn autos_pick_without_a_reading_still_leads_with_a_dash() {
-    // The active server leads even before its first probe returns.
+fn autos_pick_without_a_reading_holds_the_left_with_a_dash() {
+    // Right after `use auto` restarts the router the prober has no reading for
+    // urltest's pick yet — the slot under "auto on" must not be empty.
     let app = App::new(Box::new(Recording::new(Mode::Auto(Some("ZZ-New")))));
-    let (buf, hit, _) = stats_frame(&app, 96, 41);
-    let (r, i) = hit.chips.first().unwrap();
-    assert_eq!(app.snap.chips[*i].name, "ZZ-New");
-    assert!(app.snap.chips[hit.chips.last().unwrap().1].down);
-    assert_eq!(cells(&buf, 96, r.y, r.x as usize, r.right() as usize), "▶ ZZ-New —");
-    assert_eq!(buf.cell((r.right() - 1, r.y)).unwrap().fg, theme::dim(), "no reading → a dim dash");
+    let (buf, _, y) = stats_frame(&app, 96, 41);
+    assert_eq!(cells(&buf, 96, y + 1, 2, 12), "▶ ZZ-New —");
+    assert_eq!(buf.cell((11, y + 1)).unwrap().fg, theme::dim(), "no reading → a dim dash, not a latency color");
 }
 
 #[test]

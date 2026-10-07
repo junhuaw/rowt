@@ -34,8 +34,8 @@
 │                                                      │                                       │
 │                                                      │                                       │
 │                                                      │                                       │
-│                                                      │                                       │
-├──────────────────────────────────────────────────────┴─┤ server health ├─────────────────────┤
-│ 10 servers · 9 up · 1 down                                                                   │
-│ ▶ JP-Tokyo  42 ms   JP-Osaka 175 ms   KR-Seoul  72 ms   DE-Frankfurt 195 ms   HK-1  82 ms    │
+├──────────────────────────────────────────────────────┴─┤ server health · probe — ├───────────┤
+│ auto off   10 servers · 9 up · 1 down                                                        │
+│ ▶ JP-Tokyo  42 ms │ NL-Ams  68 ms   KR-Seoul  72 ms   SG-1  81 ms   HK-1  82 ms              │
+│ TW-Taipei 110 ms   US-LA 151 ms   JP-Osaka 175 ms   DE-Frankfurt 195 ms                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

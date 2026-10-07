@@ -1,10 +1,11 @@
 use ratatui::{backend::TestBackend, Terminal};
-use rowt_monitor::{app::{Action, App, Focus}, model::Server, source::FixtureSource, ui};
+use rowt_monitor::{app::{Action, App, Focus, ServerMode}, model::Server, source::FixtureSource, ui};
 
 mod common;
 
 fn app() -> App {
     let mut app = App::new(Box::new(FixtureSource::still()));
+    app.server_mode = ServerMode::List;
     app.snap.chips = vec![
         Server { down: false, name: "slow-active-server-region".into(), ms: Some(200), active: true },
         Server { down: false, name: "unknown-server-region".into(), ms: None, active: false },
@@ -78,6 +79,29 @@ fn active_server_leads_and_remaining_servers_wrap_in_latency_order() {
 }
 
 #[test]
+fn active_server_has_a_separator_in_list_mode_even_when_another_is_selected() {
+    let mut app = app();
+    for width in [64, 96] {
+        for selected in [0, 2] {
+            app.update(Action::SelectServer(selected));
+            let (buf, hit) = draw(&app, width, 30);
+            let active = hit.chips.iter().find(|(_, i)| *i == 0).unwrap().0;
+            let separator = active.right() + 1;
+            assert_eq!(buf[(separator, active.y)].symbol(), "│");
+            assert_eq!(buf[(separator, active.y)].fg, rowt_monitor::theme::border());
+            assert!(!hit.chips.iter().any(|(r, _)| r.y == active.y && r.x <= separator && separator < r.right()));
+        }
+    }
+    app.snap.chips[0].name = "long-active-server".repeat(10);
+    app.update(Action::SelectServer(0));
+    let (buf, hit) = draw(&app, 40, 11);
+    let active = hit.chips[0].0;
+    assert_eq!(hit.chips[0].1, 0);
+    assert_eq!(buf[(38, active.y)].symbol(), " ");
+    assert_eq!(buf[(39, active.y)].symbol(), "│");
+}
+
+#[test]
 fn active_server_stays_first_even_when_its_probe_fails() {
     let mut app = app();
     app.snap.chips[0].ms = None;
@@ -122,6 +146,7 @@ fn down_servers_sort_last_and_remain_selectable_but_cannot_be_used() {
     let source = common::Recording::new(common::Mode::Manual);
     let calls = source.calls.clone();
     let mut app = App::new(Box::new(source));
+    app.server_mode = ServerMode::List;
     app.snap.chips = vec![
         Server { name: "a-down".into(), ms: None, down: true, active: false },
         Server { name: "z-pending".into(), ms: None, down: false, active: true },
@@ -154,6 +179,7 @@ fn a_selected_server_that_goes_down_cannot_be_used() {
     let source = common::Recording::new(common::Mode::Manual);
     let calls = source.calls.clone();
     let mut app = App::new(Box::new(source));
+    app.server_mode = ServerMode::List;
     app.update(Action::SelectServer(1));
     app.snap.chips[1].down = true;
     app.snap.chips[1].ms = None;
@@ -165,6 +191,7 @@ fn a_selected_server_that_goes_down_cannot_be_used() {
 #[test]
 fn polling_keeps_selection_on_the_same_server() {
     let mut app = App::new(Box::new(FixtureSource::still()));
+    app.server_mode = ServerMode::List;
     app.snap.chips.reverse();
     let name = app.snap.chips[0].name.clone();
     app.update(Action::SelectServer(0));
@@ -239,6 +266,7 @@ fn oversized_server_name_shows_its_prefix_and_uses_the_full_name() {
     let source = common::Recording::new(common::Mode::Manual);
     let calls = source.calls.clone();
     let mut app = App::new(Box::new(source));
+    app.server_mode = ServerMode::List;
     let name = format!("abcdefghij{}vwxyz", "middle".repeat(20));
     app.snap.chips = vec![Server { down: false, name: name.clone(), ms: Some(1234), active: false }];
     let (buf, hit) = draw(&app, 40, 11);

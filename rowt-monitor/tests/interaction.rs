@@ -479,36 +479,40 @@ fn clicking_a_server_chip_focuses_and_selects_in_place() {
 }
 
 #[test]
-fn escape_clears_server_selection_without_changing_page() {
+fn strip_marquee_resumes_from_frozen_offset_on_unfreeze() {
     let mut a = app();
     a.focus = Focus::Health;
-    a.update(Action::FocusRight);
+    // Pretend the renderer last drew the marquee at cell offset 7.
+    a.strip_render_off = 7;
+    a.update(Action::FocusRight); // first ←/→ freezes to that exact offset
     assert!(a.strip_sel.is_some());
+    assert_eq!(a.strip_off, 7);
+    // Unfreeze (Esc): the marquee baseline is set to the frozen offset so it
+    // continues scrolling from there instead of jumping.
     a.update(Action::Escape);
     assert!(a.strip_sel.is_none());
-    assert_eq!(a.strip_page, 0);
+    assert_eq!(a.marquee_off0, 7, "marquee resumes from the frozen offset, not a free-running clock");
 }
 
 #[test]
 fn strip_selection_wraps_and_anchors() {
     let mut a = app();
     a.focus = Focus::Health;
-    let order = a.server_order();
-    let n = order.len();
+    let n = a.snap.chips.len();
     assert!(n >= 3, "fixture has a server pool");
-    // First ←/→ selects the first server on the current page.
+    // First ←/→ freezes the scroll and selects the first fully-visible chip.
     a.update(Action::FocusRight);
-    assert_eq!(a.strip_sel, Some(order[0]));
+    assert_eq!(a.strip_sel, Some(0));
     // Walk to the last chip, then one more wraps to the first.
     for _ in 0..n - 1 {
         a.update(Action::FocusRight);
     }
-    assert_eq!(a.strip_sel, Some(order[n - 1]));
+    assert_eq!(a.strip_sel, Some(n - 1));
     a.update(Action::FocusRight);
-    assert_eq!(a.strip_sel, Some(order[0]), "wraps past the end back to the first");
+    assert_eq!(a.strip_sel, Some(0), "wraps past the end back to the first");
     // Left from the first wraps to the last.
     a.update(Action::FocusLeft);
-    assert_eq!(a.strip_sel, Some(order[n - 1]), "wraps before the start to the last");
+    assert_eq!(a.strip_sel, Some(n - 1), "wraps before the start to the last");
 }
 
 // ---- host search (`/`) ------------------------------------------------------
