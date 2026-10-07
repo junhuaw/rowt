@@ -1143,7 +1143,7 @@ fn draw_scrollbar(buf: &mut Buffer, x: u16, y0: u16, h: usize, total: usize, scr
     put(buf, x, y, "▐", theme::fg(theme::dim()));
 }
 
-/// Cells-per-second for a selected connection/error field's horizontal scroll.
+/// Cells-per-second for the server marquee and selected connection/error fields.
 const MARQUEE_CPS: f32 = 5.0;
 
 /// Horizontal auto-scroll of an overflowing value (selected row only). `secs` is

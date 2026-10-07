@@ -831,7 +831,6 @@ you could type. Everything else stays observe-only.
 ```sh
 rowt monitor              # live view (falls back to a demo fixture if nothing is running)
 rowt monitor --fixtures   # force the offline demo
-rowt monitor --servers list # start with the two-row paged server list
 rowt monitor --theme light  # pin the palette; also --theme dark|auto, or ROWT_MONITOR_THEME
 ```
 
@@ -874,31 +873,15 @@ reports its background wrongly, or if you switch light/dark mid-session.
 - **errors & blocked** — failures and sinkholed domains over a rolling window
   (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
   refused = persistent, blocked = purple).
-- **server health** — `N up / N down`. By default the original single-row
-  scrolling strip keeps the active `▶` server pinned when there is room,
-  preserving the connection/error pane heights. **`g`** toggles a
-  paged list; **`--servers scroll|list`** selects the starting mode.
-  In list mode, servers wrap across at most two rows, without automatic
-  scrolling. The active server comes first; others sort by latency (unknown
-  after known), followed by failed servers marked `down`. `Tab` into it,
-  `←→` selects, and `↑↓` / `PgUp` / `PgDn` or the wheel changes pages; a page
-  counter appears beside the pool counts. Narrow names are clipped without
-  middle ellipses, retaining latency. Mode switches preserve selection.
-  Both modes include nodes before probing (`—`) and failed nodes (`down`);
-  failed nodes can be selected but not used.
-  Servers are probed through the tunnel against Google's `generate_204` every
-  10 min (press `r` to re-probe now), three samples per node with at most 10
-  nodes tested concurrently. Completed nodes update individually and free a
-  slot for the next node. Latency uses the median of successful samples;
-  the server-health caption shows how long ago the last round completed.
-  Pressing `r` while a round is running only reports that it is still in progress;
-  it does not restart or queue another round.
+- **server health** — server availability and latency, with the active server
+  marked `▶`. Press `g` to switch between scrolling and list views, or `r` to
+  refresh latency measurements. See the [Monitor guide](rowt-monitor/README.md)
+  for controls and details.
 
 **Navigation:** `↑↓`/`jk` move (the first press *locks* a row by domain, so a
 mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forgets
 its selection) · `←→`/`hl` switch pane / pick a server (wrapping at the ends)
-· `g` toggle scroll/list; list mode orders servers by latency and uses
-`↑↓`/`jk` and `PgUp`/`PgDn` to change pages; scroll mode uses `↑` to leave the strip
+· `g` toggle scroll/list
 · `Tab` cycle focus (connections → errors → health)
 · `v` flip the connections pane (live / ↑ upload / ↓ download) · `s` span (the
 metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `/` search

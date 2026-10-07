@@ -356,13 +356,11 @@ clash delay tests through the tunnel (like `rowt ping`) and writes results into 
 shared map; the UI reads the latest.
 
 - **Sampling:** each node is measured three times sequentially, with at most
-  10 workers taking nodes from the pool. A worker publishes each node's result
-  immediately and takes the next node without waiting for slower workers;
-  the UI picks up completed results on its next data tick.
-  The displayed latency is the median of successful
-  samples (the mean when two succeed); no successful sample means down. Each
-  request retains its 5-second timeout. The caption's `probe 2m ago` counts from
-  completion of the entire round; before that, it shows `probe —`.
+  10 workers. Each worker publishes a completed node and takes the next;
+  results appear on the next UI data tick. Latency is the median of successful
+  samples (the mean for two, the value for one); all failing means down.
+  Each request has a 5-second timeout. `probe 2m ago` measures time since the
+  last full round completed; `probe —` means no round has completed yet.
 - **Target:** `https://www.gstatic.com/generate_204` (overridable via
   `ROWT_PING_URL`). Google's endpoint is blocked when direct, so it 204s only
   *through* a working escape — this tests real escape reachability, matching
@@ -416,24 +414,28 @@ interface, the system-proxy state, and router liveness/port.
   inactivity** (`SELECTION_IDLE_TIMEOUT`, checked in `on_frame`; any key/click
   resets the timer, hover doesn't) so a held selection doesn't
   stay stuck if the operator walks away — the panes then resume live scrolling.
-- **Server list:** the active `▶` server comes first, even if its probe fails.
-  Remaining entries sort by latency ascending, missing readings last, then name
-  for ties. Other failed servers are displayed last, marked `down`; they
-  remain selectable, but `u` refuses to use them. Pending probes are distinct
-  from failures. Highlighting an entry does not reorder the list. Whole entries wrap
-  into at most three rows; the renderer reserves those rows before laying out the
-  connection/error panes. Below 21 terminal rows (including the footer), the list
-  collapses to one row. Additional rows form manual pages (`↑↓`/`jk`,
-  `PgUp`/`PgDn`, or mouse wheel over the list), with a page counter beside the
-  pool stats. `←→` walks the sorted order, wraps at the ends, and reveals the
-  selected entry's page. Clicking selects an entry in place. The renderer feeds
-  the width, row count and current page back to App. Polling remaps selection by
-  server name so a probe result cannot change the target of `u`; a removed server
-  clears selection. Names too wide for one row use a middle `…`, keeping up to
-  10 leading and 5 trailing characters, reduced further to fit the display width,
-  while retaining latency. Actions still use the full name.
-  There is no server marquee. `Tab`/`Shift-Tab` leave
-  the list, and `Esc` clears its selection without changing pages.
+- **Server modes:** `ServerMode::Scroll` is the default; lowercase `g` toggles
+  modes, and `--servers scroll|list` sets the initial mode. Selection survives
+  mode switches and is remapped by server name on poll, so sorting cannot change
+  the target of `u`; removing a server clears its selection. Failed servers
+  remain selectable, but `u` refuses to use them.
+- **Scroll mode:** one row, preserving the original connection/error pane
+  heights. When the pool overflows, the active `▶` chip is pinned outside the
+  scrolling ring if at least `MIN_RING_W` cells remain; a ` │ ` seam separates
+  it from the ring. `Hit` feeds back the ring width, pinned index, and rendered
+  offset together so selection freezes exactly the frame shown. `←→` wraps
+  through entries and reveals the selected chip. Clearing selection resets
+  `marquee_off0` / `marquee_t0` to resume from the frozen offset; `↑` leaves
+  the strip for connections.
+- **List mode:** the active server comes first, even when down, followed by
+  reachable servers in latency order, pending readings, and failed servers;
+  names break latency ties. Whole entries wrap into at most two rows, falling
+  back to one when height is limited. The renderer reserves those rows before
+  laying out the panes and feeds width, row count, and page back through `Hit`.
+  Additional rows form manual pages; selecting across a boundary reveals that
+  page, while `Esc` clears selection without changing pages. Oversized names
+  are clipped at the right edge, retaining latency; actions use the full name.
+  Undersized frames preserve the last valid geometry for restoration on resize.
 - **Control layer** (§1): contextual keys act on the current selection —
   `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `t` puts
   it on the hotspot lane (the OS proxy-bypass list — `app::Target::Hotspot`,
@@ -553,7 +555,12 @@ pool.
 ## 9. Testing
 
 - **Golden diff** (`tests/golden.rs`): byte-exact plain-text match at 96/150/212
-  vs the frozen captures, with masked divergences (§10) and a color spot-check.
+  vs the original frozen captures, with masked divergences (§10) and a color
+  spot-check. These tests and captures are unchanged by the list feature.
+- **List and mode tests** (`tests/server_list.rs`, `tests/server_modes.rs`,
+  `tests/resize.rs`): paging, sorting, selection, mode switches, CLI options,
+  and compact/resized frames. List glyphs match separate
+  `renders/rowt-monitor-list-*.txt` captures without masks.
 - **Parsers** (`source/parse.rs`): clash JSON → connections/lanes/rates,
   timestamp/civil math, rule normalization, error classification, window
   aggregation, and the split (sparse + block-bucket) aggregation with lane
@@ -565,14 +572,27 @@ pool.
 - **Headless smoke:** `tmux` drives the real binary (send-keys / capture-pane) to
   confirm the frame renders, the filter chip appears, and it exits cleanly.
 
+Capture filenames retain legacy dimensions: `96x30`, `150x38`, and `212x52`
+correspond to actual render sizes **96×41**, **150×30**, and **212×30**, in both
+modes. For example, generate list captures at the middle size with:
+
+```sh
+rowt-monitor --servers list --render 150x30
+rowt-monitor --servers list --theme dark --render-ansi 150x30
+rowt-monitor --servers list --theme light --render-ansi 150x30
+```
+
+ANSI captures are visual references; the automated golden comparisons use
+plain-text glyphs. Preserve the original scroll baselines when updating list
+captures.
+
 ---
 
 ## 10. Intentional deviations from the frozen capture
 
-The `renders/*.txt` baselines originated in the handoff and are updated for
-intentional layout changes. The server list is now checked without masking;
-legacy identity-band masks retain dedicated assertions. Changes since the
-handoff include:
+The original scrolling `.txt` captures are a frozen snapshot of the handoff.
+Deliberate deviations are masked in `tests/golden.rs` and covered by dedicated
+assertions. List mode uses separate baselines (§9).
 
 - **Logo bottom row** shifted one space left so its stems align with the rows
   above.
@@ -582,9 +602,8 @@ handoff include:
   there's no reading (name greys out).
 - **Errors TYPE colored by category** (dns=orange, timeout/reset/refused=red,
   blocked=purple) — the color carries the category.
-- **Server list** wraps into at most three rows with manual paging and latency
-  ordering. The active server is marked `▶`; the stats line omits its name since
-  it is already in the identity band. These rows are included in the goldens.
+- **Server strip** shows the active server marked `▶` (the capture excluded it);
+  the stats line dropped `active <name>` since it's in the identity band.
 - **Connections table** drops the per-row `↑`/`↓` (redundant with the UP/DOWN
   column headers; header rate rows keep theirs), and shows cumulative bytes
   (§5.1). Header/lane rows show `—` when a row has no connections.
