@@ -60,7 +60,7 @@ fn small_windows_keep_the_existing_tables_and_servers_usable() {
             assert!(hit.conn_h > 0 && hit.err_h > 0, "{w}x{h}");
             assert!(hit.side_by_side, "keep the existing two-pane layout");
             assert!(!hit.chips.is_empty(), "{w}x{h}");
-            assert!(hit.strip_rows <= 3);
+            assert!(hit.strip_rows <= 2);
             assert!(hit.conn_list.bottom() < hit.server_list.top());
             assert!(hit.err_list.bottom() < hit.server_list.top());
             for (r, _) in hit.chips {
@@ -76,7 +76,7 @@ fn server_list_uses_one_row_only_when_height_is_limited() {
     let mut term = Terminal::new(TestBackend::new(40, 30)).unwrap();
     let mut app = App::new(Box::new(FixtureSource::still()));
     let tall = frame(&mut term, &mut app, 40, 30);
-    assert_eq!(tall.strip_rows, 3);
+    assert_eq!(tall.strip_rows, 2);
     let short = frame(&mut term, &mut app, 40, 12);
     assert_eq!(short.strip_rows, 1);
     app.focus = Focus::Health;

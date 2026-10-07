@@ -372,7 +372,7 @@ impl App {
             strip_sel: None,
             strip_page: 0,
             strip_w: u16::MAX,
-            strip_rows: 3,
+            strip_rows: 2,
             armed: None,
             pending_reload: None,
             proxy_optimistic: None,

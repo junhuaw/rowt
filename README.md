@@ -877,7 +877,7 @@ reports its background wrongly, or if you switch light/dark mid-session.
   `▶`. Other servers sort by latency from low to high (unknown after known),
   followed by failed servers marked `down`; these can be selected but not used.
   The complete pool is shown immediately; nodes without a reading display `—`.
-  Servers wrap across at most three rows, with no automatic scrolling. `Tab` into it,
+  Servers wrap across at most two rows, with no automatic scrolling. `Tab` into it,
   `←→` selects a server, and `↑↓` / `PgUp` / `PgDn` or the mouse wheel over the
   list changes pages; the page counter appears beside the pool counts.
   Servers are probed through the tunnel against Google's `generate_204` every

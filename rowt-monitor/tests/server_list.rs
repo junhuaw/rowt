@@ -176,7 +176,7 @@ fn polling_keeps_selection_on_the_same_server() {
 }
 
 #[test]
-fn server_pages_have_at_most_three_rows_and_cover_the_pool() {
+fn server_pages_have_at_most_two_rows_and_cover_the_pool() {
     let mut app = app();
     app.snap.chips = (0..20).map(|i| Server {
         down: false,
@@ -184,12 +184,12 @@ fn server_pages_have_at_most_three_rows_and_cover_the_pool() {
     }).collect();
     app.focus = Focus::Health;
     let mut seen = Vec::new();
-    for _ in 0..7 {
+    for _ in 0..10 {
         let (_, hit) = draw(&app, 96, 30);
         let mut rows: Vec<_> = hit.chips.iter().map(|(r, _)| r.y).collect();
         rows.sort();
         rows.dedup();
-        assert!(rows.len() <= 3);
+        assert!(rows.len() <= 2);
         seen.extend(hit.chips.iter().map(|(_, i)| *i));
         app.feed_strip(&hit);
         app.update(Action::Down);
@@ -197,7 +197,7 @@ fn server_pages_have_at_most_three_rows_and_cover_the_pool() {
     assert_eq!(seen, std::iter::once(19).chain(0..19).collect::<Vec<_>>());
     app.update(Action::Up);
     let (_, hit) = draw(&app, 96, 30);
-    assert_eq!(hit.chips[0].1, 14);
+    assert_eq!(hit.chips[0].1, 15);
 }
 
 #[test]
@@ -229,13 +229,13 @@ fn oversized_unicode_name_keeps_latency_inside_the_frame() {
     let (buf, hit) = draw(&app, 96, 30);
     let (r, _) = hit.chips[0];
     let text: String = (r.x..r.right()).map(|x| buf[(x, r.y)].symbol()).collect();
-    assert!(text.contains('…') && text.contains("1234 ms"), "{text}");
+    assert!(!text.contains('…') && text.contains("1234 ms"), "{text}");
     assert_eq!(buf[(95, r.y)].symbol(), "│");
     assert_eq!(hit.strip_rows, 1);
 }
 
 #[test]
-fn oversized_server_name_keeps_both_ends_and_uses_the_full_name() {
+fn oversized_server_name_shows_its_prefix_and_uses_the_full_name() {
     let source = common::Recording::new(common::Mode::Manual);
     let calls = source.calls.clone();
     let mut app = App::new(Box::new(source));
@@ -244,14 +244,15 @@ fn oversized_server_name_keeps_both_ends_and_uses_the_full_name() {
     let (buf, hit) = draw(&app, 40, 11);
     let (r, i) = hit.chips[0];
     let text: String = (r.x..r.right()).map(|x| buf[(x, r.y)].symbol()).collect();
-    assert!(text.contains("abcdefghij…vwxyz 1234 ms"), "{text}");
+    assert_eq!(text, format!("{} 1234 ms", &name[..28]));
+    assert!(!text.contains('…') && !text.contains("vwxyz"), "{text}");
     app.update(Action::SelectServer(i));
     app.update(Action::UseServer);
     assert_eq!(*calls.lock().unwrap(), vec![name]);
 }
 
 #[test]
-fn middle_ellipsis_keeps_unicode_ends_within_the_available_cells() {
+fn oversized_unicode_name_is_clipped_without_ellipsis_and_preserves_latency() {
     let mut app = app();
     app.snap.chips = vec![Server { down: false, name: format!("东京{}末尾节点一", "中间".repeat(40)), ms: Some(1234), active: true }];
     let (buf, hit) = draw(&app, 40, 11);
@@ -259,7 +260,9 @@ fn middle_ellipsis_keeps_unicode_ends_within_the_available_cells() {
     let text: String = (r.x..r.right()).map(|x| buf[(x, r.y)].symbol()).collect();
     let visible = text.replace(' ', "");
     assert!(visible.starts_with("▶东京"), "{text}");
-    assert!(visible.contains("…末尾节点一1234ms"), "{text}");
+    assert!(visible.starts_with("▶东京中间中间中间中间中间中"), "{text}");
+    assert!(visible.ends_with("1234ms"), "{text}");
+    assert!(!visible.contains('…') && !visible.contains("末尾"), "{text}");
     assert_eq!(buf[(39, r.y)].symbol(), "│");
 }
 
@@ -283,7 +286,7 @@ fn selection_stays_visible_on_resize_and_page_is_clamped_when_pool_shrinks() {
     for (w, h) in [(96, 30), (150, 30), (212, 20)] {
         let (_, hit) = draw(&app, w, h);
         assert!(hit.chips.iter().any(|(_, i)| *i == 19));
-        assert!(hit.strip_rows <= 3);
+        assert!(hit.strip_rows <= 2);
         app.feed_strip(&hit);
     }
     app.update(Action::Escape);

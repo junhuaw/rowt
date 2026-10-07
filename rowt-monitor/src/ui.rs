@@ -87,8 +87,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     let bottom = y0 + h - 1; // frame bottom ╰──╯
     let server_rows = app.server_rows(w.saturating_sub(4));
     let server_h = if h < 20 { 1 }
-        else if compact { server_rows.len().min(3) }
-        else { server_rows.len().min(3).min(h.saturating_sub(19) as usize).max(1) };
+        else if compact { server_rows.len().min(2) }
+        else { server_rows.len().min(2).min(h.saturating_sub(19) as usize).max(1) };
     let chips_y = bottom - server_h as u16;
     let stats_y = chips_y - 1;
     let merge_y = stats_y - 1; // ├──┴─┤ server health ├─┤
@@ -889,40 +889,26 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
             };
             let prefix = if c.active { "▶ " } else { "" };
             let width = app.server_width(i, w);
-            let name_width = width.saturating_sub(dw(prefix) + 1 + dw(&ms)) as usize;
-            let name = server_name(&c.name, name_width);
+            let name_width = width.saturating_sub(1 + dw(&ms));
             let name_style = if picked { theme::bold(theme::armed()) }
                 else if c.down { theme::fg(theme::dim()) }
                 else if c.active { theme::bold(theme::escape()) } else { theme::fg(theme::bright()) };
             let line = Line::from(vec![
                 Span::styled(prefix, bg(theme::fg(theme::escape()))),
-                Span::styled(name, bg(name_style)),
+                Span::styled(&c.name, bg(name_style)),
+            ]);
+            let cy = y + dy as u16;
+            let (end, _) = buf.set_line(x, cy, &line, name_width);
+            let latency = Line::from(vec![
                 Span::styled(" ", bg(theme::fg(theme::bright()))),
                 Span::styled(ms, bg(theme::fg(color))),
             ]);
-            let cy = y + dy as u16;
-            buf.set_line(x, cy, &line, width);
+            buf.set_line(end, cy, &latency, width.saturating_sub(end - x));
             hit.chips.push((Rect::new(x, cy, width, 1), i));
             x += width + 3;
         }
     }
     hover_chip(buf, app, present, hit);
-}
-
-/// Keep the identifying ends of an oversized server name, leaving latency intact.
-fn server_name(name: &str, width: usize) -> String {
-    use ratatui::text::Span;
-    if Span::raw(name).width() <= width { return name.to_string(); }
-    if width == 0 { return String::new(); }
-    let chars: Vec<_> = name.chars().collect();
-    let mut head = chars.len().min(10);
-    let mut tail = chars.len().saturating_sub(head).min(5);
-    loop {
-        let shown = format!("{}…{}", chars[..head].iter().collect::<String>(),
-                            chars[chars.len() - tail..].iter().collect::<String>());
-        if Span::raw(&shown).width() <= width { return shown; }
-        if head > tail { head -= 1; } else { tail -= 1; }
-    }
 }
 
 /// Brighten and underline the visible server under the pointer.

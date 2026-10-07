@@ -155,13 +155,13 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
   All pool members appear immediately, even before probing or while the router
   is down. Pending readings show `—` and do not count as up or down.
   Down servers can be selected but cannot be switched to with `u`.
-  Entries wrap automatically and occupy at most **three rows**.
+  Entries wrap automatically and occupy at most **two rows**.
   The active server stays first even if its probe fails. There is no
   automatic scrolling. Focus with `Tab`; `←→` selects servers, while `↑↓`/`jk`,
   `PgUp`/`PgDn`, or the wheel over the list changes pages. Selection follows the
   server name across probe refreshes, and selecting across a page boundary reveals
-  that server. Names too wide for a whole row use a middle `…`, keeping up to
-  the first 10 and last 5 characters (fewer when necessary) and the latency.
+  that server. Names too wide for a whole row are clipped at the right edge, without an
+  ellipsis or a suffix from the end of the name; latency remains visible.
   Switching servers always uses the full name.
   Each probe round measures every node three times, with at most 10 nodes
   being tested concurrently. Each finished node publishes its result immediately
@@ -176,7 +176,7 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
 The interactive layout supports **40 columns × 12 rows** (including the footer).
 Small windows use a compact header and fewer table columns, keeping the two
 panes side by side. Below 21 rows, the server list uses one row with paging;
-taller windows show up to three rows as needed. Below 40×12, a resize hint
+taller windows show up to two rows as needed. Below 40×12, a resize hint
 replaces the layout; expanding the terminal restores the display and server page.
 
 ## Data sources
