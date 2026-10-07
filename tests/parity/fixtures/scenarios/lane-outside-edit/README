@@ -1,0 +1,15 @@
+Lane files edited OUTSIDE rowt since its last logged state — by hand, or by an
+agent writing the file directly, the case that used to leave no trace at all.
+
+config/cache/lane-state.tsv is the last state rowt logged. It disagrees with the
+base fixture's lane files in four ways:
+  * ads.example is in block-domains.txt but not in the state  -> an outside ADD
+  * gone.example is in the state's escape lane, in no file     -> an outside REMOVAL
+  * tracker.example.net is block in the files, escape in the state -> an outside MOVE
+  * domain:not-a-dup.example is an EXACT entry only the state holds -> an outside
+    REMOVAL spelled the way the file spelled it, `domain:` and all
+
+The next mutating command, or the next watchdog tick, has to log exactly those
+as `LANE outside rowt: …` BEFORE its own BEGIN — never blamed on the command —
+and then adopt the live state. host.pid.self makes the router read as running,
+so a `watch tick` reaches its corp sync, the step that runs the check in a tick.

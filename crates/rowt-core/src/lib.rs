@@ -17,6 +17,7 @@ pub mod hotspot;
 pub mod importmerge;
 pub mod laneerr;
 pub mod lanes;
+pub mod lanestate;
 pub mod netdetect;
 pub mod pycli;
 pub mod pyjson;

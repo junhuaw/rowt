@@ -39,6 +39,8 @@
 #   35.  let an agent's watch install carry on     -> cli-diff must fire
 #   36.  keep empty query values in a share link   -> vless-diff must fire
 #   38.  rename the overlay bypass marker          -> cli-diff must fire
+#   39.  stop noticing lane edits made outside rowt -> cli-diff must fire
+#   40.  stop naming the lane an entry LEFT          -> cli-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1109,6 +1111,50 @@ else
     bad "cli-diff passed with the two sides writing a different overlay bypass block"
   else
     ok "cli-diff caught an overlay bypass block written differently"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "39. a lane edit made outside rowt must be logged, and compared"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The audit log names every lane membership change, and one written outside
+  # rowt (an editor, an agent writing the file) is noticed at the next command
+  # against cache/lane-state.tsv — a file under cache/, which the fsstate
+  # snapshot skips. So the only thing comparing it is the audit log itself, in
+  # the lane-outside-edit scenario. Blind one side's check; cli-diff must see it.
+  perl -0pi -e 's|\[ -f "\$LANE_STATE" \] && _lane_audit_lines "\$LANE_STATE" "\$now" "outside rowt: "|: no outside check|' "$tmp/bin/rowt"
+  if grep -qF '"outside rowt: "' "$tmp/bin/rowt"; then
+    bad "could not remove the outside check (_lane_audit_begin moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=lane-outside-edit corp sync --no-reload')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with one side not logging lane edits made outside rowt"
+  else
+    ok "cli-diff caught an outside lane edit logged on one side only"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "40. a route to direct must name the lane the entry left"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The case this exists for: the monitor's `d` runs `rm` against all four
+  # lanes, and only the lane that held the host may log — by name. Spell the
+  # absent side differently on one implementation; the block rm case must fail.
+  perl -0pi -e 's|f = \(e in b\) \? b\[e\] : "direct"|f = (e in b) ? b[e] : "unlisted"|' "$tmp/bin/rowt"
+  if ! grep -qF ': "unlisted"; t =' "$tmp/bin/rowt"; then
+    bad "could not respell the absent lane (_lane_diff moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'block add fresh-sentinel.example --no-reload')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the two sides naming a lane transition differently"
+  else
+    ok "cli-diff caught a lane transition named differently"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

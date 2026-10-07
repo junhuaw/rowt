@@ -841,7 +841,9 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
                 }
             }
             Action::CorpSync => {
+                crate::lanelog::begin(&ctx.cfg);
                 let _ = crate::corp::sync(ctx, true);
+                crate::lanelog::end(&ctx.cfg, "watchdog corp sync: ");
             }
             Action::WriteNetId(n) => {
                 let _ = std::fs::write(ctx.cfg.join("watch.net"), format!("{n}\n"));
@@ -1165,8 +1167,11 @@ fn tick(ctx: &Ctx) {
     // because it can take the router down and the observation has to judge the
     // machine that exists afterwards. netcheck emits `Action::CorpSync` to
     // record that it happened — `perform_planned` skips it, or every tick
-    // would sync twice.
+    // would sync twice. Bracketed for the lane audit like the shell's, since
+    // a tick is not a bracketed command.
+    crate::lanelog::begin(&ctx.cfg);
     let _ = crate::corp::sync(ctx, true);
+    crate::lanelog::end(&ctx.cfg, "watchdog corp sync: ");
     if lifecycle::host_running(ctx).is_none() {
         finish_tick(ctx, &lock);
         return;

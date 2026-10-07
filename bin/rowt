@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.21"
+ROWT_VERSION="3.5.22"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -194,7 +194,7 @@ err()  { echo "error: $*" >&2; }
 # _AUDIT_OP names the mutating op currently in flight (empty when none), so die()
 # can attribute a failure to it in the audit log without threading context.
 _AUDIT_OP=""
-die()  { err "$*"; [ -n "${_AUDIT_OP:-}" ] && _audit "ABORT ${_AUDIT_OP}: $*"; exit 1; }
+die()  { err "$*"; [ -n "${_AUDIT_OP:-}" ] && { _lane_audit_end; _audit "ABORT ${_AUDIT_OP}: $*"; }; exit 1; }
 
 # ---------- audit log -------------------------------------------------------
 # One line per mutating operation — CLI or watchdog — so "what changed the
@@ -221,6 +221,70 @@ _audit() { # $* = message
       tail -n "$AUDIT_MAX" "$AUDIT_LOG" > "$AUDIT_LOG.tmp" 2>/dev/null && mv -f "$AUDIT_LOG.tmp" "$AUDIT_LOG" 2>/dev/null || true
     fi
   fi
+}
+# Lane membership in the audit log. A bracket says `block import my-list.txt`
+# ran, not which entries it added: on 2026-10-06 tracing why one site's
+# bot-defence host was blocked meant finding a month-old import file on disk and
+# grepping it, and a lane file written outside rowt left no trace at all. So the
+# bracket diffs membership too — every (lane, entry) pair across the four lane
+# files — and logs each change as a transition, `block -> direct` for a host the
+# monitor routed direct, `escape -> block` for one an add pulled out of escape,
+# `direct -> block` for every line of an import. One line per transition, the
+# entries in full: a 300-entry import is one long line (AUDIT_MAX counts lines),
+# and the full list is what makes it reversible. Entries are kept AS WRITTEN
+# (`domain:x`, `*.x`), so undoing a line re-adds the identical text.
+#
+# cache/lane-state.tsv is the LAST LOGGED state (0600 — it holds the corp lane).
+# Before a mutating command or a watchdog tick, a difference from it happened
+# outside rowt (an editor, an agent writing the file) and is logged as such
+# rather than blamed on the command; the command's own change is then the
+# difference from that state at the end. Diffing against the persisted state at
+# the END, not a private copy, is what keeps a nested rowt (rowt-rs handing
+# `config import` to this shell) from logging the same move twice. Absent state
+# is a baseline: recorded, nothing logged. The format, sort and spelling are
+# rowt_core::lanestate's, byte for byte.
+LANE_STATE="$CACHE/lane-state.tsv"
+_lane_snapshot() { # every lane entry as "<lane>\t<entry>", byte-sorted, unique
+  local l f
+  for l in block corp escape hotspot; do
+    case "$l" in block) f="$BLOCK_DOMAINS" ;; corp) f="$CORP_DOMAINS" ;; escape) f="$DOMAINS" ;; *) f="$HOTSPOT_DOMAINS" ;; esac
+    [ -f "$f" ] || continue
+    LC_ALL=C awk -v l="$l" '{ gsub(/[[:space:]]/, "") } $0 != "" && substr($0, 1, 1) != "#" { print l "\t" $0 }' "$f"
+  done | LC_ALL=C sort -u
+}
+_lane_diff() { # $1=before $2=after (snapshot files)  $3=prefix -> "LANE …" lines
+  LC_ALL=C awk -F'\t' '
+    { t = index($0, "\t"); if (t < 2 || t == length($0)) next
+      l = substr($0, 1, t - 1); e = substr($0, t + 1) }
+    FILENAME == ARGV[1] { b[e] = (e in b) ? b[e] "+" l : l; s[e] = 1; next }
+    { a[e] = (e in a) ? a[e] "+" l : l; s[e] = 1 }
+    END { for (e in s) { f = (e in b) ? b[e] : "direct"; t = (e in a) ? a[e] : "direct"
+                         if (f != t) print f " -> " t "\t" e } }
+  ' <(LC_ALL=C sort -u "$1") <(LC_ALL=C sort -u "$2") | LC_ALL=C sort | LC_ALL=C awk -F'\t' -v pre="${3:-}" '
+    $1 != k { if (k != "") print "LANE " pre k " (" n "): " list; k = $1; n = 0; list = "" }
+    { n++; list = (list == "") ? $2 : list " " $2 }
+    END { if (k != "") print "LANE " pre k " (" n "): " list }'
+}
+_lane_state_keep() { # $1=snapshot file, consumed
+  { mkdir -p "$CACHE" && chmod 600 "$1" && mv -f "$1" "$LANE_STATE"; } 2>/dev/null || rm -f "$1"
+}
+_lane_audit_lines() { # $1=before $2=after $3=prefix — each line to the audit log
+  local _ll
+  while IFS= read -r _ll; do [ -n "$_ll" ] && _audit "$_ll"; done < <(_lane_diff "$1" "$2" "${3:-}" 2>/dev/null)
+}
+_lane_audit_begin() { # before a mutating command or a tick: what moved outside rowt
+  [ -d "$CFG" ] || return 0
+  local now; now="$(mktemp 2>/dev/null)" || return 0
+  _lane_snapshot > "$now" 2>/dev/null || { rm -f "$now"; return 0; }
+  [ -f "$LANE_STATE" ] && _lane_audit_lines "$LANE_STATE" "$now" "outside rowt: "
+  _lane_state_keep "$now"
+}
+_lane_audit_end() { # $1=prefix — after it: what the command (or the tick) moved
+  [ -d "$CFG" ] && [ -f "$LANE_STATE" ] || return 0
+  local now; now="$(mktemp 2>/dev/null)" || return 0
+  _lane_snapshot > "$now" 2>/dev/null || { rm -f "$now"; return 0; }
+  _lane_audit_lines "$LANE_STATE" "$now" "${1:-}"
+  _lane_state_keep "$now"
 }
 # Progress/diagnostics go to stderr so a function's stdout stays pure data — this
 # is what lets value-returning helpers (used in "$(...)") log safely.
@@ -5744,7 +5808,9 @@ cmd_watch() {
       # result CHANGED; a no-op when nothing new — learned domains/CIDRs persist).
       # Runs before the net-change check so a plain VPN or LAN change (which needn't
       # move the physical iface) still applies.
+      _lane_audit_begin                           # lane edits made outside rowt, logged as such
       corp_sync --quiet || true
+      _lane_audit_end "watchdog corp sync: "
       host_running || exit 0                      # corp_sync may have reloaded/restarted
       local ifc cur svc need=0 nid last
       ifc="$(detect_iface 2>/dev/null || true)"
@@ -6163,7 +6229,7 @@ o@lifecycle@connections [lane|-w]@live view: active connections + which lane eac
 o@lifecycle@monitor [--theme dark|light|auto]@read-only TUI: live connections, errors/blocked, server health
 o@lifecycle@run <command> [args...]@auto-pick a proxy env that reaches the net, then run the command
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
-o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations)
+o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations, lane moves entry by entry)
 o@lifecycle@metrics [status|top|path|query]@per-domain traffic history (bytes in/out over time)
 o@lifecycle@config [list|export|import]@back up / move the whole setup to another machine; 'export --to shadowrocket' for an iPhone
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
@@ -7498,9 +7564,11 @@ main() {
     return $?
   fi
   local _op="$cmd${*:+ $*}" _t0="$SECONDS" _rc=0
+  _lane_audit_begin
   _AUDIT_OP="$_op"
   _audit "BEGIN $_op"
   run_command "$cmd" "$@" || _rc=$?
+  _lane_audit_end
   _audit "END   $_op rc=$_rc ($(( SECONDS - _t0 ))s)"
   _AUDIT_OP=""
   return "$_rc"

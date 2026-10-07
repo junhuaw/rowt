@@ -112,7 +112,12 @@ foreground with output redirected to a file (see SKILL.md → Rules).
 - `rowt metrics top [secs]`: the heaviest domains. The collector records per-domain
   bytes (`rowt metrics query "<SQL>"` is read-only).
 - `rowt audit`: who changed what, whether a person (`by=zsh`) or the watchdog
-  (`by=launchd`).
+  (`by=launchd`). Lane changes are itemised: `LANE block -> direct (1): x.com`
+  (the monitor routed it direct), `LANE direct -> block (336): …` (an import, in
+  full), `LANE outside rowt: …` (a lane file edited behind rowt's back, noticed at
+  the next command or tick). To find when something got blocked:
+  `grep -F 'x.com' ~/.config/rowt/log/audit.log`; to undo a line, re-add or
+  remove the same entries in the lane on the other side of the arrow.
 - `rowt report`: a masked, shareable diagnostic file.
 - **`rowt monitor`** is a TUI; the user runs it in their own terminal. Keys:
   - `v` flips the view (live, up-history, down-history); `s` sets the span; `f`
