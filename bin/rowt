@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.6.0"
+ROWT_VERSION="3.6.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4583,7 +4583,21 @@ cmd_doctor() {
     END { print list(p); print list(c); print list(o) }' > "$t/apps" || true
   local vpn_up
   vpn_up="$(scutil --nc list 2>/dev/null | awk -F'"' '/\(Connected\)/ { s = s (s == "" ? "" : ", ") $2 } END { print s }' || true)"
-  _dr_row apps "proxy clients: $(sed -n 1p "$t/apps") · corp VPN: $(sed -n 2p "$t/apps") · overlay: $(sed -n 3p "$t/apps")${vpn_up:+ · connected VPN services: $vpn_up}"
+  # Tunnels that are up, overlays aside — vendor-neutral, so a VPN that runs a raw
+  # utun (and shows neither as a VPN service nor as a known client) still shows.
+  local tun_ifs
+  tun_ifs="$(ifconfig 2>/dev/null | awk '/^[a-z]/ { i = $1; sub(/:$/, "", i) }
+    $1 == "inet" && i ~ /^(utun|ipsec|ppp)/ && $2 !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print i }' \
+    | sort -u | paste -sd, - | sed 's/,/, /g' || true)"
+  # The corp VPN column names a KNOWN client. A corp VPN whose client is not on
+  # that list printed as "none" right above "tunnels up: utun10", and that "none"
+  # read as "no VPN" — after a power outage it sent an agent off to reconnect a
+  # VPN that was up. With no known client but a tunnel up, say that instead; it
+  # does not claim the tunnel IS the corp VPN (a personal client's utun passes
+  # the same filter), only that "none" would be wrong.
+  local corp_app; corp_app="$(sed -n 2p "$t/apps")"
+  if [ "$corp_app" = none ] && [ -n "$tun_ifs" ]; then corp_app="no known client; a tunnel is up ($tun_ifs)"; fi
+  _dr_row apps "proxy clients: $(sed -n 1p "$t/apps") · corp VPN: $corp_app · overlay: $(sed -n 3p "$t/apps")${vpn_up:+ · connected VPN services: $vpn_up}"
 
   # network
   local dflt phys hwport overlay_if
@@ -4591,12 +4605,6 @@ cmd_doctor() {
   phys="$(detect_iface 2>/dev/null || true)"
   hwport="$(networksetup -listallhardwareports 2>/dev/null | awk -v d="$phys" '/^Hardware Port:/ { p = substr($0, 16) } $0 == "Device: " d { print p; exit }' || true)"
   overlay_if="$(ifconfig 2>/dev/null | awk '/^[a-z]/ { i = $1; sub(/:$/, "", i) } /inet 100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print i; exit }' || true)"
-  # Tunnels that are up, overlays aside — vendor-neutral, so a VPN that runs a raw
-  # utun (and shows neither as a VPN service nor as a known client) still shows.
-  local tun_ifs
-  tun_ifs="$(ifconfig 2>/dev/null | awk '/^[a-z]/ { i = $1; sub(/:$/, "", i) }
-    $1 == "inet" && i ~ /^(utun|ipsec|ppp)/ && $2 !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print i }' \
-    | sort -u | paste -sd, - | sed 's/,/, /g' || true)"
   _dr_row network "physical ${phys:-none}${hwport:+ ($hwport)} · default route via ${dflt:-none}${tun_ifs:+ · tunnels up: $tun_ifs}${overlay_if:+ · 100.64/10 overlay on $overlay_if}"
   [ -n "$phys" ] || _dr_flag NO_PHYSICAL_NETWORK "no Wi-Fi or Ethernet interface is up"
   case "$dflt" in utun*|ipsec*|ppp*) _dr_flag VPN_HOLDS_DEFAULT "$dflt carries the default route" ;; esac
