@@ -10,6 +10,7 @@
 pub mod bplist;
 pub mod cksum;
 pub mod classify;
+pub mod corpview;
 pub mod foreign;
 pub mod foreignio;
 pub mod geosite;

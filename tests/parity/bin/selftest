@@ -43,6 +43,7 @@
 #   40.  stop naming the lane an entry LEFT          -> cli-diff must fire
 #   41.  take the lowest sample, not the median      -> cli-diff must fire
 #   42.  drop best's 50 ms tolerance to 0             -> cli-diff must fire
+#   43.  pass a stale corp verdict off as current    -> cli-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1204,6 +1205,29 @@ else
     bad "cli-diff passed with the two sides switching on different tolerances"
   else
     ok "cli-diff caught best switching by a different rule"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "43. a stale corp VPN verdict must never read as current"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The `corp lane` line shows a checker's verdict, and an old one is "no
+  # opinion": the checker may have stopped, and its last `ok` must not pin the
+  # view (the 2026-10-11 misreading, the other way round). Ignore staleness on
+  # one side; the stale-verdict case must fail. If it passes, the verdict file
+  # has fallen out of the sandbox and both sides are reading something else.
+  perl -0pi -e 's|if \[ "\$age" -gt "\$CORP_HEALTH_STALE" \]; then|if false; then|' "$tmp/bin/rowt"
+  if grep -qF 'if [ "$age" -gt "$CORP_HEALTH_STALE" ]; then' "$tmp/bin/rowt"; then
+    bad "could not drop the staleness check (_corp_view moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=corp-health-stale status')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with one side passing a stale verdict off as current"
+  else
+    ok "cli-diff caught a stale corp verdict read as current"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

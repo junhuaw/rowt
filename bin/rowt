@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.6.1"
+ROWT_VERSION="3.6.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -160,6 +160,12 @@ AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes al
 # and the monitor), and keeps the current server unless another beats it by more
 # than BEST_TOLERANCE ms or it stopped answering. `auto` above is sing-box's
 # urltest, which can only switch on single samples. See rowt_core::latency.
+# A corp VPN health CHECKER's verdict file (corp-route writes `<epoch> <ok|fail|
+# down|untested> <corp id>` every 30 s). rowt shows it on the `corp lane` line as
+# the checker's call and never judges the VPN itself; older than the stale limit
+# it is "no opinion". See rowt_core::corpview.
+CORP_HEALTH="${ROWT_CORP_HEALTH:-/Library/Application Support/corp-route/corp-health}"
+CORP_HEALTH_STALE="${ROWT_CORP_HEALTH_STALE:-300}"
 BEST_INTERVAL="${ROWT_BEST_INTERVAL:-600}"       # seconds a server's median stays fresh before re-measuring
 BEST_TOLERANCE="${ROWT_BEST_TOLERANCE:-50}"      # ms another server must beat the current one by (urltest's default)
 BEST_TIMEOUT="${ROWT_BEST_TIMEOUT:-5}"           # seconds per sample when rowt measures for `best`
@@ -1046,6 +1052,34 @@ _vpn_iface() {
     [ "$n" -gt "$bestn" ] && { best="$ifc"; bestn="$n"; }
   done
   [ "$bestn" -ge 3 ] && printf '%s\n' "$best"
+}
+
+# The `corp lane` line for status and doctor: the tunnel rowt would route corp
+# traffic into, labelled as NOT a health check, then a checker's verdict when one
+# is published (never rowt's own). It used to read `corp VPN: none` — a list of
+# recognised VPN client apps — and on 2026-10-11 an agent took that for "the corp
+# VPN is down" while it was fine. rowt cannot tell: its tunnel test holds
+# throughout exactly the outages that matter. Byte for byte rowt_core::corpview.
+_corp_view() {
+  local tun line ep rest word now age
+  tun="$(_vpn_iface 2>/dev/null || true)"
+  if [ -n "$tun" ]; then printf 'routes into %s (the tunnel rowt sends corp traffic to; not a VPN health check)' "$tun"
+  else printf '%s' "no corp tunnel seen, so corp traffic follows the OS routing table (not a VPN health check)"; fi
+  printf ' · VPN health: '
+  if [ ! -e "$CORP_HEALTH" ]; then echo "not judged by rowt (no corp-route verdict) — ask your VPN client"; return 0; fi
+  line="$(head -n 1 "$CORP_HEALTH" 2>/dev/null || true)"
+  ep="${line%% *}"; rest=""; [ "$line" != "$ep" ] && rest="${line#* }"; word="${rest%% *}"
+  case "$ep" in ''|*[!0-9]*) word="" ;; esac
+  case "$word" in ''|*[!A-Za-z_-]*) echo "corp-route's verdict is unreadable"; return 0 ;; esac
+  now="$(date +%s)"; age=$(( now - ep )); [ "$age" -ge 0 ] || age=0
+  if [ "$age" -gt "$CORP_HEALTH_STALE" ]; then echo "unknown — corp-route's last verdict ($word) is $(_span "$age") old"
+  else echo "$word, per corp-route $(_span "$age") ago"; fi
+}
+_span() { # seconds -> "12 s" / "7 min" / "3 h" / "9 d", whole units rounded down
+  if [ "$1" -lt 60 ]; then echo "$1 s"
+  elif [ "$1" -lt 7200 ]; then echo "$(( $1 / 60 )) min"
+  elif [ "$1" -lt 172800 ]; then echo "$(( $1 / 3600 )) h"
+  else echo "$(( $1 / 86400 )) d"; fi
 }
 
 # The Tailscale tunnel: the utun whose inet sits in 100.64/10 (CGNAT), or empty.
@@ -4589,15 +4623,17 @@ cmd_doctor() {
   tun_ifs="$(ifconfig 2>/dev/null | awk '/^[a-z]/ { i = $1; sub(/:$/, "", i) }
     $1 == "inet" && i ~ /^(utun|ipsec|ppp)/ && $2 !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print i }' \
     | sort -u | paste -sd, - | sed 's/,/, /g' || true)"
-  # The corp VPN column names a KNOWN client. A corp VPN whose client is not on
-  # that list printed as "none" right above "tunnels up: utun10", and that "none"
-  # read as "no VPN" — after a power outage it sent an agent off to reconnect a
-  # VPN that was up. With no known client but a tunnel up, say that instead; it
-  # does not claim the tunnel IS the corp VPN (a personal client's utun passes
-  # the same filter), only that "none" would be wrong.
+  # `VPN clients`: the recognised corp VPN client APPS running, matched by process
+  # name — not whether any VPN works. A corp VPN whose client is not on that list
+  # printed as "corp VPN: none" right above "tunnels up: utun10", and after a power
+  # outage that "none" sent an agent off to reconnect a VPN that was up. With no
+  # known client but a tunnel up, say that; it does not claim the tunnel IS the
+  # corp VPN (a personal client's utun passes the same filter). Whether the VPN
+  # WORKS is the `corp` row's, and there only as a checker's verdict.
   local corp_app; corp_app="$(sed -n 2p "$t/apps")"
   if [ "$corp_app" = none ] && [ -n "$tun_ifs" ]; then corp_app="no known client; a tunnel is up ($tun_ifs)"; fi
-  _dr_row apps "proxy clients: $(sed -n 1p "$t/apps") · corp VPN: $corp_app · overlay: $(sed -n 3p "$t/apps")${vpn_up:+ · connected VPN services: $vpn_up}"
+  _dr_row apps "proxy clients: $(sed -n 1p "$t/apps") · VPN clients: $corp_app · overlay: $(sed -n 3p "$t/apps")${vpn_up:+ · connected VPN services: $vpn_up}"
+  _dr_row corp "$(_corp_view)"
 
   # network
   local dflt phys hwport overlay_if
@@ -4934,6 +4970,7 @@ cmd_status() {
   [ -n "$svc" ] && _proxy_pac_on "$svc" && echo "auto-proxy:   ⚠ a PAC is enabled on '$svc' and macOS resolves it BEFORE rowt's proxy — traffic may bypass the lanes ('$PROG proxy check' for detail)"
   [ "$(sget captive)" = 1 ] && echo "captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)"
   echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
+  echo "corp lane:    $(_corp_view)"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
   fi

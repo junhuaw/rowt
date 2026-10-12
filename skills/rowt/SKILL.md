@@ -58,14 +58,19 @@ rowt onboard                   # rowt's own setup checklist
   `generativelanguage.googleapis.com`.
 - **What doctor reports:** it changes nothing and takes about 10 s. It shows the
   system and rowt's version, and which apps own ports 7890 and 9090. It lists other
-  proxy and VPN software and who holds the default route, the system proxy and any
-  PAC, and reachability over the physical NIC and through 7890. It also says whether
-  passwordless proxy writes are available and which clients can be imported. It
-  ends with **FLAGS**.
+  proxy and VPN client apps running, who holds the default route, the system proxy
+  and any PAC, and reachability over the physical NIC and through 7890. It also says
+  whether passwordless proxy writes are available and which clients can be imported.
+  It ends with **FLAGS**.
+- **The `corp` row is not a VPN health check.** It names the tunnel rowt would route
+  corp traffic into, which exists throughout exactly the outages that matter, and
+  `VPN clients: none` only means no recognised client app is running. Whether the
+  corp VPN works is a dedicated checker's call: report the row's `VPN health:` part
+  as that checker's verdict (corp-route's, when installed), and when it says rowt
+  doesn't judge, say so — never infer VPN health from rowt.
 
-Then tell the user in plain words: what's installed, which VPN clients and corp VPN
-you found, whether they're behind a firewall, what could bite (the flags), and the
-plan. Ask only what the evidence can't answer. Re-run `rowt doctor` after any big
+Then tell the user in plain words: what's installed, which VPN clients you found,
+whether they're behind a firewall, what could bite (the flags), and the plan. Ask only what the evidence can't answer. Re-run `rowt doctor` after any big
 change.
 
 ### What the flags mean, and who acts

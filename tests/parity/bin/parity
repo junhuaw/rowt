@@ -197,8 +197,14 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
   while [ "$#" -gt 0 ]; do
     case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
   done
+  # ROWT_CORP_HEALTH: the corp VPN checker's verdict file is OUTSIDE the config
+  # tree (/Library/Application Support/corp-route/corp-health), so without this
+  # a status case would read this machine's live verdict — and its age, which
+  # moves between the two runs. Inside the sandbox it exists only when the
+  # scenario ships env/corp-health. Before ENVS, so a case can still override.
   env -i \
     ROWT_CAPTIVE_RETRY= \
+    ROWT_CORP_HEALTH="$out/env/corp-health" \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
@@ -222,8 +228,14 @@ run_one() {      # $1=outdir  rest=rowt args
   # `$TMO` is the same timeout trick rowt itself uses (_tmo), plus the session
   # and process-group handling a `tail -f`-style command needs — it keeps one
   # from wedging the harness, and from outliving it.
+  # ROWT_CORP_HEALTH: the corp VPN checker's verdict file is OUTSIDE the config
+  # tree (/Library/Application Support/corp-route/corp-health), so without this
+  # a status case would read this machine's live verdict — and its age, which
+  # moves between the two runs. Inside the sandbox it exists only when the
+  # scenario ships env/corp-health. Before ENVS, so a case can still override.
   env -i \
     ROWT_CAPTIVE_RETRY= \
+    ROWT_CORP_HEALTH="$out/env/corp-health" \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
@@ -1377,6 +1389,7 @@ cmd_cli_diff() {
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
         ROWT_GEOSITE_BASE="$DEAD_URL" ROWT_CAPTIVE_RETRY= \
+        ROWT_CORP_HEALTH="$A/env/corp-health" \
         ${cenv[@]+"${cenv[@]}"} \
         ROWT_PY="${PARITY_BASH_PY:-1}" \
         ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
@@ -1392,6 +1405,7 @@ cmd_cli_diff() {
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
         ROWT_GEOSITE_BASE="$DEAD_URL" ROWT_CAPTIVE_RETRY= \
+        ROWT_CORP_HEALTH="$B/env/corp-health" \
         ${cenv[@]+"${cenv[@]}"} \
         perl -e "$TMO" "$tmo" \
         "$rs" $cmdline > "$B/out" 2>/dev/null < /dev/null ) 2>/dev/null || brc=$?

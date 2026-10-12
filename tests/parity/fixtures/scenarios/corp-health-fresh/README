@@ -1,0 +1,6 @@
+A corp VPN health checker's verdict file (corp-route's format: `<epoch> <ok|fail|
+down|untested> <corp id>`), which the harness points ROWT_CORP_HEALTH at. The
+epoch is the year 3000, so the verdict is always fresh — its age clamps to 0 —
+and the `corp lane` line in status shows it as the CHECKER's call ("ok, per
+corp-route 0 s ago"), never printing the corp id. Without a file (every other
+scenario), the line says the VPN's health is not rowt's to judge.

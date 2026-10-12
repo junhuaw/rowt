@@ -488,6 +488,18 @@ fn geosite_hint(cfg: &Path, label: &str, domain: &str, have: &[String]) -> Vec<S
     }
 }
 
+/// `_corp_view` — the `corp lane` line's text, for status (doctor is the shell's).
+fn corp_view() -> String {
+    let path = env_or("ROWT_CORP_HEALTH", "/Library/Application Support/corp-route/corp-health");
+    let p = Path::new(&path);
+    // `[ -e … ]` then `head -n 1`: an existing but unreadable file reads as empty.
+    let verdict = p.exists().then(|| read(p));
+    let stale: i64 = env_or("ROWT_CORP_HEALTH_STALE", "300").parse().unwrap_or(300);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+    rowt_core::corpview::line(&corp::vpn_iface(), verdict.as_deref(), now, stale)
+}
+
 /// `geosites_of` over a lane list — used for explain's rule-set note.
 fn geosites(body: &str) -> Vec<String> {
     rowt_core::render::geosites_of(body)
@@ -2009,6 +2021,9 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let geo_s = if geo.is_empty() { String::new() } else { format!(" +geosite:{}", geo.join(",")) };
             o.push(format!("buckets:      escape={n_esc} corp={n_corp} block={n_blk}{ads}{geo_s} final={}",
                            env_or("ROWT_FINAL", "direct")));
+            // What rowt's corp lane sees, and a checker's verdict — never rowt's
+            // own call on the VPN (rowt_core::corpview, the shell's _corp_view).
+            o.push(format!("corp lane:    {}", corp_view()));
             if ctx.sb().is_file() && ctx.host_cfg().is_file() {
                 let ok = std::process::Command::new(ctx.sb()).arg("check").arg("-c").arg(ctx.host_cfg())
                     .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
