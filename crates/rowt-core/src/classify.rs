@@ -63,6 +63,9 @@ pub struct ClassifyInput<'a> {
     pub resolved_ip: &'a str,
     /// `$PROG` — the name the advice in a `note` tells the user to run.
     pub prog: &'a str,
+    /// The resolver the router uses for a name no rule matched, "" when the
+    /// router does not resolve such names at all (see `router_resolves`).
+    pub resolver: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +291,15 @@ pub fn bypass_hit(dest: &str, hotspot: &str) -> Option<String> {
     best
 }
 
+/// Does the router resolve a name no rule matched? The renderer's condition,
+/// exactly: only when the final route is direct (an escape or block final must
+/// not look names up locally), and only when there are address rules to feed —
+/// corp CIDRs, or the private/overlay default.
+pub fn router_resolves(final_route: Lane, corp: &str, private_default: &str) -> bool {
+    final_route == Lane::Direct
+        && (!crate::render::parse_list(corp, crate::render::Filter::Cidr).is_empty() || private_default == "corp")
+}
+
 /// Would this destination reach the branch that needs a DNS answer?
 ///
 /// The shell resolves lazily — `resolve_ip` runs only in the `else` after both
@@ -329,34 +341,28 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
             HitKind::Suffix => format!("longest-match {}-domains suffix '{m}'", l.as_str()),
         };
     } else {
-        // A NAME is classified by its domain, BEFORE anything is resolved: the
-        // route rules the renderer emits match the sniffed domain, and the
-        // ip_cidr rules (corp CIDRs, the private/overlay default) only ever see
-        // an address dialled directly. So an unlisted name takes the final
-        // route however its A record looks — measured 2026-10-02, when a name
-        // resolving into 100.64/10 was dialled bound to en0 out of lane-direct.
-        // This used to answer CORP for such a name, which was wrong on exactly
-        // the names that are broken; the address now goes in a `note` instead.
+        // A name no rule matched. When the final route is direct and there are
+        // address rules to feed, the router RESOLVES it (the `resolve` rule the
+        // renderer places after every name rule) at the direct lane's own
+        // resolver, and the address rules route it — so a name resolving into a
+        // corp CIDR or a private/overlay range goes corp, as the address would.
+        // Otherwise nothing is resolved and the final route takes it. `resolver`
+        // is that resolver, "" when the router does not resolve (`router_resolves`).
         ip = i.resolved_ip.to_string();
         lane = i.final_route;
         why = format!(
             "no block/corp/escape rule; final route = {}",
             i.final_route.as_str()
         );
-        let fr = i.final_route.as_str();
-        if !ip.is_empty() {
-            if let Some(m) = cidr_hit(&ip, i.corp_list) {
-                note = format!("resolves to {ip}, inside corp CIDR '{m}' — but that rule only matches an IP you dial directly, so the NAME still goes {fr} ('{} corp add <suffix>' corp-routes the name)", i.prog);
+        if !i.resolver.is_empty() {
+            if ip.is_empty() {
+                note = format!("does not resolve at {}, the resolver the router uses for names no rule matched — the connection fails there (logged under the direct lane). An intranet name: '{p} corp add <suffix>' sends it to the corp lane, which resolves at the system resolver. A tailnet or other overlay zone only the OS resolves: '{p} hotspot add <suffix>' hands it to the OS.", i.resolver, p = i.prog);
+            } else if let Some(m) = cidr_hit(&ip, i.corp_list) {
+                lane = Lane::Corp;
+                why = format!("no name rule; the router resolves it to {ip}, inside corp CIDR '{m}'");
             } else if let Some(m) = private_hit(&ip, i.private_cidrs, i.private_default) {
-                note = if m == "100.64.0.0/10" {
-                    // The overlay case, and the one that matters: a zone served
-                    // only by an overlay resolver answers for the OS and for
-                    // nothing rowt can point a lane at (sing-box's `local` is
-                    // /etc/resolv.conf, which carries the primary resolver only).
-                    format!("resolves to {ip}, an overlay address in '{m}' — the name still goes {fr}, and an overlay zone usually answers only at the OS resolver ('{} hotspot add <suffix>' hands it to the OS, which is the only resolver that can)", i.prog)
-                } else {
-                    format!("resolves to {ip}, private/overlay range '{m}' — but that rule only matches an IP you dial directly, so the NAME still goes {fr} ('{} corp add <suffix>' corp-routes the name)", i.prog)
-                };
+                lane = Lane::Corp;
+                why = format!("no name rule; the router resolves it to {ip}, private/overlay range '{m}' (unbound, OS routing)");
             }
         }
     }
@@ -383,8 +389,53 @@ mod tests {
             final_route: Lane::Direct,
             local_mode: false,
             resolved_ip: "",
+            resolver: "",
             prog: "rowt",
         }
+    }
+
+    fn resolving<'a>(corp: &'a str, priv_cidrs: &'a [String], ip: &'a str, resolver: &'a str) -> ClassifyInput<'a> {
+        ClassifyInput { resolved_ip: ip, resolver, ..input("", corp, "", priv_cidrs) }
+    }
+
+    #[test]
+    fn a_name_the_router_resolves_into_a_corp_cidr_goes_corp() {
+        let p = vec!["10.0.0.0/8".to_string()];
+        let c = classify("svc.corp.example", &resolving("198.51.100.0/24\n", &p, "198.51.100.7", "223.5.5.5"));
+        assert_eq!(c.lane, Lane::Corp);
+        assert_eq!(c.why, "no name rule; the router resolves it to 198.51.100.7, inside corp CIDR '198.51.100.0/24'");
+        assert!(c.note.is_empty());
+        let c = classify("nas.example", &resolving("198.51.100.0/24\n", &p, "10.2.3.4", "223.5.5.5"));
+        assert_eq!((c.lane, c.why.as_str()), (Lane::Corp, "no name rule; the router resolves it to 10.2.3.4, private/overlay range '10.0.0.0/8' (unbound, OS routing)"));
+        let c = classify("pub.example", &resolving("198.51.100.0/24\n", &p, "203.0.113.9", "223.5.5.5"));
+        assert_eq!(c.lane, Lane::Direct);
+    }
+
+    #[test]
+    fn a_name_the_router_cannot_resolve_gets_both_hand_fixes() {
+        let p = vec!["10.0.0.0/8".to_string()];
+        let c = classify("nores.example", &resolving("198.51.100.0/24\n", &p, "", "223.5.5.5"));
+        assert_eq!(c.lane, Lane::Direct);
+        assert!(c.note.starts_with("does not resolve at 223.5.5.5,"), "{}", c.note);
+        assert!(c.note.contains("rowt corp add <suffix>") && c.note.contains("rowt hotspot add <suffix>"));
+    }
+
+    #[test]
+    fn with_no_resolver_a_name_is_not_resolved_and_takes_the_final_route() {
+        // An escape or block final, or no address rules: nothing is looked up,
+        // even if the caller had an address to offer.
+        let p = vec!["10.0.0.0/8".to_string()];
+        let c = classify("svc.corp.example", &resolving("198.51.100.0/24\n", &p, "198.51.100.7", ""));
+        assert_eq!((c.lane, c.note.as_str()), (Lane::Direct, ""));
+    }
+
+    #[test]
+    fn the_router_resolves_only_for_a_direct_final_with_address_rules() {
+        assert!(router_resolves(Lane::Direct, "198.51.100.0/24\n", "direct"));
+        assert!(router_resolves(Lane::Direct, "corp.example\n", "corp"));
+        assert!(!router_resolves(Lane::Direct, "corp.example\n", "direct"));
+        assert!(!router_resolves(Lane::Escape, "198.51.100.0/24\n", "corp"));
+        assert!(!router_resolves(Lane::Block, "198.51.100.0/24\n", "corp"));
     }
 
     #[test]

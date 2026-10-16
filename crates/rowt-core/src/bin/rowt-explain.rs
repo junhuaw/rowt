@@ -62,6 +62,11 @@ fn run() -> Result<String, String> {
             .collect();
     let final_route = Lane::parse(&env_or("ROWT_FINAL", "direct")).ok_or("bad ROWT_FINAL")?;
     let private_default = env_or("ROWT_PRIVATE_DEFAULT", "corp");
+    let resolver = if rowt_core::classify::router_resolves(final_route, &corp, &private_default) {
+        if mode == "local" { env_or("ROWT_DNS_LOCAL", "1.1.1.1") } else { env_or("ROWT_DNS_DIRECT", "223.5.5.5") }
+    } else {
+        String::new()
+    };
 
     let input = ClassifyInput {
         escape_list: &escape,
@@ -74,6 +79,7 @@ fn run() -> Result<String, String> {
         resolved_ip: &ip,
         // `basename $0` in the shell, and this gate always drives bin/rowt.
         prog: "rowt",
+        resolver: &resolver,
     };
 
     if let Some(path) = corpus {

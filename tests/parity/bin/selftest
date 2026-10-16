@@ -44,6 +44,8 @@
 #   41.  take the lowest sample, not the median      -> cli-diff must fire
 #   42.  drop best's 50 ms tolerance to 0             -> cli-diff must fire
 #   43.  pass a stale corp verdict off as current    -> cli-diff must fire
+#   44.  stop resolving unmatched names              -> render-matrix must fire
+#   45.  file the router's lookup failure as escape  -> splitter-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1228,6 +1230,45 @@ else
     bad "cli-diff passed with one side passing a stale verdict off as current"
   else
     ok "cli-diff caught a stale corp verdict read as current"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "44. the resolve rule that routes an unmatched name by address must be compared"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-render" ]; then
+  echo "  skip — no release build"
+else
+  # A name no rule matched is resolved by the router (final route direct) so the
+  # corp CIDRs can route it — without it, a corp host on an unlisted suffix goes
+  # direct and is reset. Drop the rule on one side; the render matrix must fail.
+  perl -0pi -e 's|then \{action:"resolve", server:"dns-direct", strategy:"prefer_ipv4"\} else empty end|then empty else empty end|' "$tmp/bin/rowt"
+  if grep -qF '{action:"resolve", server:"dns-direct"' "$tmp/bin/rowt"; then
+    bad "could not drop the resolve rule (the renderer moved?)"
+  elif PARITY_RUST_RENDER="$ROOT/target/release/rowt-render" "$P" render-matrix >/dev/null 2>&1; then
+    bad "render-matrix passed with one side not resolving unmatched names"
+  else
+    ok "render-matrix caught a missing resolve rule"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "45. a router lookup failure must land in the direct lane on both sides"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # With names resolved by the router, a name that does not resolve fails as
+  # `router: lookup <name>: …`, not as an outbound failure. The splitter files it
+  # under direct so `rowt direct errors` and the monitor still see it. File it
+  # elsewhere in the Python one; splitter-diff must fail.
+  perl -0pi -e 's|dom, tag, reason = r.group\(1\), "direct",|dom, tag, reason = r.group(1), "escape",|' "$tmp/bin/rowt"
+  if ! grep -qF 'r.group(1), "escape",' "$tmp/bin/rowt"; then
+    bad "could not misfile the router lookup (SPLITTER_PY moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" splitter-diff 200 >/dev/null 2>&1; then
+    bad "splitter-diff passed with the two splitters filing a router lookup differently"
+  else
+    ok "splitter-diff caught a router lookup filed under the wrong lane"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

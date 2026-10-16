@@ -535,16 +535,27 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
             .iter().map(|s| s.to_string()).collect();
     let final_route = Lane::parse(&env_or("ROWT_FINAL", "direct")).unwrap_or(Lane::Direct);
     let pd = env_or("ROWT_PRIVATE_DEFAULT", "corp");
-    // Resolved only on the branch that needs it — see `needs_resolution`.
-    let ip = if rowt_core::classify::needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block) {
-        rowt_platform::resolve_ip(&rowt_core::classify::normalize_dest(dest))
+    // The resolver the router uses for a name no rule matched (the direct lane's
+    // dns-direct: the public one in local mode), and only when the router
+    // resolves such names at all. Asked exactly as the shell asks it
+    // (`_captive_resolve_at`), and only on the branch that needs it.
+    let resolver = if rowt_core::classify::router_resolves(final_route, &lanes.corp, &pd) {
+        if mode == "local" { env_or("ROWT_DNS_LOCAL", "1.1.1.1") } else { env_or("ROWT_DNS_DIRECT", "223.5.5.5") }
+    } else {
+        String::new()
+    };
+    let ip = if !resolver.is_empty()
+        && rowt_core::classify::needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block)
+    {
+        use rowt_platform::Platform;
+        rowt_platform::Mac.resolve_at(&resolver, &rowt_core::classify::normalize_dest(dest)).unwrap_or_default()
     } else {
         String::new()
     };
     let c = classify(dest, &ClassifyInput {
         escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block,
         private_cidrs: &private, private_default: &pd, final_route,
-        local_mode: mode == "local", resolved_ip: &ip, prog: PROG,
+        local_mode: mode == "local", resolved_ip: &ip, prog: PROG, resolver: &resolver,
     });
     let mut out = c.render();
     if !c.note.is_empty() {

@@ -264,14 +264,21 @@ pub fn render_host(i: &HostInput) -> Value {
         i.geo.block.iter()
             .map(|n| json!({"rule_set": [format!("geosite-{n}")], "outbound": "block"})),
     );
+    // The ad set sits before the address rules, and a name no rule matched is
+    // resolved (only when the final route is direct) so the address rules can
+    // route it — the shell's renderer explains why, at length.
+    if !i.geo.ads_path.is_empty() {
+        rules.push(json!({"rule_set": ["geosite-ads"], "outbound": "block"}));
+    }
+    let address_rules = !i.lists.corp_cidrs.is_empty() || i.private_default == "corp";
+    if i.final_route == "direct" && address_rules {
+        rules.push(json!({"action": "resolve", "server": "dns-direct", "strategy": "prefer_ipv4"}));
+    }
     if !i.lists.corp_cidrs.is_empty() {
         rules.push(json!({"ip_cidr": i.lists.corp_cidrs, "outbound": "corp"}));
     }
     if i.private_default == "corp" {
         rules.push(json!({"ip_cidr": i.private_cidrs, "outbound": "corp"}));
-    }
-    if !i.geo.ads_path.is_empty() {
-        rules.push(json!({"rule_set": ["geosite-ads"], "outbound": "block"}));
     }
 
     let dns_servers = json!([

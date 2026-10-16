@@ -554,6 +554,16 @@ PARITY_SCENARIO=corp-health-fresh status
 PARITY_SCENARIO=corp-health-stale status
 PARITY_SCENARIO=corp-health-garbled status
 PARITY_SCENARIO=corp-vpn status
+# A name no rule matched is resolved by the router (final route direct) and the
+# address rules route it: explain asks the router's own resolver, through the
+# dig fixtures in explain-resolve (see its README for each expected lane).
+PARITY_SCENARIO=explain-resolve explain corp-svc.example
+PARITY_SCENARIO=explain-resolve explain lan-svc.example
+PARITY_SCENARIO=explain-resolve explain pub.example
+PARITY_SCENARIO=explain-resolve explain nores.example
+PARITY_SCENARIO=explain-resolve ROWT_FINAL=escape explain corp-svc.example
+PARITY_SCENARIO=explain-resolve ROWT_PRIVATE_DEFAULT=direct explain lan-svc.example
+PARITY_SCENARIO=explain-resolve ROWT_PRIVATE_DEFAULT=direct explain corp-svc.example
 PARITY_SCENARIO=best-tick-fresh use alpha
 run
 

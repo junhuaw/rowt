@@ -351,7 +351,7 @@ pub fn run_splitter(host_log: &Path, logdir: &Path) {
         }
         let line = String::from_utf8_lossy(&raw);
         let clean = strip_ansi(&line);
-        if let Some((dom, tag, reason)) = parse_conn(&clean) {
+        if let Some((dom, tag, reason)) = parse_conn(&clean).or_else(|| parse_router_lookup(&clean)) {
             let lane = match tag.as_str() {
                 "block" | "direct" | "corp" => tag.clone(),
                 _ => "escape".to_string(),
@@ -427,6 +427,32 @@ fn parse_conn(s: &str) -> Option<(String, String, String)> {
     // into the next field.
     let reason = after[rb + 1..].strip_prefix(": ")?.trim_end_matches('\n').to_string();
     Some((dom.to_string(), tag, reason))
+}
+
+/// `router: lookup ([A-Za-z0-9._-]+): (.*)` — a name the ROUTER failed to resolve
+/// (the `resolve` rule before the address rules). Only names headed for the
+/// direct lane are resolved there, so it files under `direct`, with the reason in
+/// the outbound failure's old shape: `lookup <name>: <why>`.
+///
+/// `re.search` tries every start, so a first occurrence that does not parse must
+/// not end the search — hence the loop.
+fn parse_router_lookup(s: &str) -> Option<(String, String, String)> {
+    const PAT: &str = "router: lookup ";
+    let mut from = 0;
+    while let Some(off) = s[from..].find(PAT) {
+        let start = from + off + PAT.len();
+        let rest = &s[start..];
+        let n = rest.bytes().take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
+        if n > 0 {
+            if let Some(why) = rest[n..].strip_prefix(": ") {
+                let why = why.split('\n').next().unwrap_or("");
+                let dom = &rest[..n];
+                return Some((dom.to_string(), "direct".into(), format!("lookup {dom}: {why}")));
+            }
+        }
+        from = from + off + 1;
+    }
+    None
 }
 
 fn find_ts(s: &str) -> Option<String> {

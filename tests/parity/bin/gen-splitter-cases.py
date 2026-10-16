@@ -58,6 +58,33 @@ NOISE = [
 
 TS = ["2026-08-11 09:00:00", "2026-01-02 23:59:59", None]
 
+# The router's own lookup failure — a name no rule matched is resolved before the
+# address rules, and when that fails the line is `router: lookup <name>: <why>`,
+# filed under the direct lane. Names outside [A-Za-z0-9._-] must NOT match (an
+# IDN arrives as punycode), and `re.search` keeps looking past a first occurrence
+# that does not parse, so a malformed one followed by a good one is here too.
+ROUTER_NAMES = ["corp-host.example", "a.b_c-d.example", "x", "", "中文.example",
+                "has space.example", "colon:in.example"]
+ROUTER_WHYS = ["(exchange4: NXDOMAIN | exchange6: NXDOMAIN)", "context deadline exceeded",
+               "", "why with\ttab"]
+
+
+def router_line(r: random.Random) -> str:
+    name, why, ts = r.choice(ROUTER_NAMES), r.choice(ROUTER_WHYS), r.choice(TS)
+    head = f"{ts} ERROR [123 16ms] " if ts else "ERROR "
+    shape = r.random()
+    if shape < 0.6:
+        line = f"{head}router: lookup {name}: {why}"
+    elif shape < 0.75:
+        line = f"{head}router: lookup {name}:{why}"                      # no space: near-miss
+    elif shape < 0.9:
+        line = f"{head}router: lookup bad name: x router: lookup {name}: {why}"
+    else:
+        line = f"{head}router:lookup {name}: {why}"                      # not the router's prefix
+    if r.random() < 0.2:
+        line = f"\x1b[31m{line}\x1b[0m"
+    return line
+
 
 def conn_line(r: random.Random) -> str:
     dom, port = r.choice(DOMAINS), r.choice(PORTS)
@@ -83,10 +110,10 @@ def main() -> int:
     for i in range(count):
         d = work / f"case{i:04d}"
         d.mkdir(parents=True, exist_ok=True)
-        lines = [
-            conn_line(rng) if rng.random() < 0.65 else rng.choice(NOISE)
-            for _ in range(rng.randint(0, 14))
-        ]
+        lines = []
+        for _ in range(rng.randint(0, 14)):
+            roll = rng.random()
+            lines.append(conn_line(rng) if roll < 0.55 else router_line(rng) if roll < 0.75 else rng.choice(NOISE))
         body = "\n".join(lines)
         # The three stream endings, because they are three different questions:
         # a normal EOF, a last line with NO newline (Python writes it without

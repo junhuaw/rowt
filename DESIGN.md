@@ -56,11 +56,12 @@ walks the rules **top to bottom, first match wins**:
 | `domain:<host>` in any lane (`<lane> add --domain`) | that lane | a sing-box `domain` rule — **whole-host equality**, no subdomains. Emitted ahead of every suffix rule, so it wins outright for that one host: `corp add --domain dev.g.alicdn.com` keeps just that name on corp while `escape add alicdn.com` covers the rest of the CDN |
 | `domain_suffix` in `block-domains.txt` | **block** | refused instantly — no DNS, no dial (kills the ad/tracker retry storm) |
 | `domain_suffix` in `corp-domains.txt` | **corp** | resolved to an intranet IP (see §4), sent via the **routing table** → matches the corp route → into `utunN` → corp network |
-| `ip_cidr` in `corp-domains.txt` (e.g. `10.0.0.0/8`) | **corp** | literal intranet IP → routing table → `utunN` → corp |
 | `domain_suffix` in `escape-domains.txt` | **escape** | VLESS socket **bound to en0** → home router → VPS → the VPS reaches Google |
 | `geosite:<name>` in `escape-domains.txt` / `block-domains.txt` (e.g. `geosite:google`) | that lane | a maintained sing-geosite category, pulled as a `rule_set` — covers a whole service (all ccTLDs) without enumerating suffixes; runs after the hand lists, before the ad set. Escape + block only (corp is domains/CIDRs); a specific suffix always wins over it |
-| `geosite-category-ads-all` rule-set | **block** | broad ad/tracker blocklist (opaque, so it runs *after* the hand lists) |
-| unlisted IP in a **private/overlay range** (RFC1918, CGNAT `100.64/10`, link-local) | **corp** | unbound → routing table. Overlay hosts (Tailscale peers), LAN devices, and bare intranet IPs reach correctly with no config — some tunnel routed that range, and forcing it out `en0` would break it. `ROWT_PRIVATE_DEFAULT=direct` restores the old always-en0 behavior |
+| `geosite-category-ads-all` rule-set | **block** | broad ad/tracker blocklist (opaque, so it runs *after* the hand lists — and before the address rules below, so an ad domain is never resolved) |
+| **resolve** a name no rule above matched (only when `final` is `direct`) | — | not a lane: the router looks the name up at the direct lane's own resolver (`dns-direct`, `prefer_ipv4`), so the two address rules below can route it. One lookup, the one the direct lane would have made anyway, reused by the outbound. Never emitted for an `escape`/`block` final, whose names must not be looked up locally. A name that does not resolve fails here, logged as `router: lookup …` and filed under the direct lane |
+| `ip_cidr` in `corp-domains.txt`, matched against a literal IP **or a resolved name** | **corp** | routing table → `utunN` → corp. A corp host on a suffix nobody listed now rides the tunnel instead of going out `en0` and being reset |
+| unlisted IP — literal or resolved — in a **private/overlay range** (RFC1918, CGNAT `100.64/10`, link-local) | **corp** | unbound → routing table. Overlay hosts (Tailscale peers), LAN devices, and bare intranet IPs reach correctly with no config — some tunnel routed that range, and forcing it out `en0` would break it. `ROWT_PRIVATE_DEFAULT=direct` restores the old always-en0 behavior |
 | no match → `final` (default `direct`) | **direct** | direct socket **bound to en0** → home router → the public internet, corp untouched |
 
 **Longest suffix wins, not lane order.** rowt does *not* emit one rule per lane
@@ -75,10 +76,13 @@ overrides the broad blocklist) but before `final`.
 
 Two consequences worth internalizing:
 
-- **Corp intranet host names must be listed as domains** (rule #1), not left to
-  the IP-CIDR rule. The CIDR rule (#2) only fires for *literal IPs* (e.g.
-  `ssh 30.221.4.5`), because a name has to be resolved first — and an intranet
-  name only resolves through corp DNS, which rule #1 arranges (see §4).
+- **List a corp suffix when its names only resolve through corp DNS.** A name
+  no rule matched is resolved at the PUBLIC resolver (`dns-direct`) before the
+  CIDR rule sees it, so the CIDR rule catches corp hosts that public DNS answers
+  with their intranet address — and only those. A split-horizon name the public
+  resolver does not know fails at that lookup; the corp suffix rule sends it to
+  the corp lane, which resolves through the system resolver instead (§4).
+  `rowt explain <name>` says which case a name is, and the fix.
 - **`direct` genuinely bypasses corp.** Because its socket is pinned to `en0`,
   Baidu traffic never enters the corp tunnel — faster, and it keeps your
   personal browsing off the corporate network.

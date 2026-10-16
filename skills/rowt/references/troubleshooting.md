@@ -81,6 +81,14 @@ server; some servers fail it while carrying real traffic. Verify with
   Fix: `brew upgrade rowt && rowt reload`.
 - From 3.1.1, corp names resolve through the system resolver at connect time.
 
+**A corp host is reset through the proxy but loads with no proxy.**
+
+- It is on a suffix nobody added, so it went `direct` (bound to the physical NIC).
+- `rowt explain <host>` says which case it is. If the router resolves it into a corp
+  CIDR, it already routes corp (rowt 3.6.3 and later; before that, add the suffix).
+  If it "does not resolve at" the router's resolver, it is split-horizon: run
+  `rowt corp add <suffix>`.
+
 **Corp host unreachable while on the corp network.**
 
 - `rowt explain <host>`: is it corp?

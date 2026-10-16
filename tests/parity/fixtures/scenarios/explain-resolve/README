@@ -1,0 +1,15 @@
+`rowt explain` for a NAME no rule matched, now that the router resolves such a
+name (when the final route is direct) and lets the address rules route it. The
+dig fixtures answer for the router's resolver — explain asks exactly it, with
+the same `dig +short +time=2 +tries=1 @<server> <name>` both implementations
+use for the captive check — so each case shows one outcome:
+
+  corp-svc.example -> 198.51.100.7, inside the base fixture's corp CIDR
+                      198.51.100.0/24                      -> CORP
+  lan-svc.example  -> 10.20.30.40, private range           -> CORP (unbound)
+  pub.example      -> 203.0.113.9                          -> DIRECT
+  nores.example    -> no answer -> DIRECT, and a note with both hand fixes
+
+With ROWT_FINAL=escape nothing is resolved and the trace has no dig; with
+ROWT_PRIVATE_DEFAULT=direct the private name stays direct while the corp CIDR
+still routes corp-svc.

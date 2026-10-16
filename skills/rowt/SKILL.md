@@ -18,7 +18,10 @@ and a corp VPN coexist because nothing fights over the default route:
 
 Unlisted **private/overlay IPs** (RFC 1918, `100.64/10`, link-local) take the corp lane,
 so VPN, LAN and Tailscale hosts work with no configuration; only unlisted public IPs
-go direct. That is by IP; a **tailnet NAME** is a different case — only the overlay's
+go direct. The same holds for an unlisted **name** whose public DNS answer lands in a
+corp CIDR or a private range: the router resolves it first and routes it corp (when the
+final route is direct). A corp name public DNS does not know still needs
+`rowt corp add <suffix>` — `rowt explain <name>` says which. That is by IP; a **tailnet NAME** is a different case — only the overlay's
 own resolver answers it, and no lane can reach that resolver (sing-box reads
 `/etc/resolv.conf`, which holds the primary resolver alone, so corp fails exactly as
 direct does). `corp sync` detects such a zone and proxy-BYPASSES it instead, so macOS
