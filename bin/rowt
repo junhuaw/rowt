@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.6.4"
+ROWT_VERSION="3.6.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2195,36 +2195,40 @@ _sub_update_busy() {
     ''|*[!0-9]*|0) [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 0 ;;
     *) kill -0 "$pid" 2>/dev/null && return 0 ;;
   esac
-  rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true
+  rm -f "$lock/pid" "$lock/acc" "$lock/acc.n" "$lock/error" "$lock/servers"
+  rmdir "$lock" 2>/dev/null || true
   [ -d "$lock" ]
 }
 
-_sub_update_fail() { result="error: $*"; err "$*"; exit 1; }
+_sub_update_fail() { _SUB_RESULT="error: $*"; err "$*"; exit 1; }
 
 # Keep the last complete pool if any subscription fails. The lock spans fetch
 # and reload, shared by monitor, CLI and watchdog; a crashed owner is reclaimed.
 _sub_update() (
   umask 077
-  local lock="$CFG/sub-update.lock" result="" acc url out why shown sub_err sel summary changed=0
+  # Bash 3.2 unwinds function locals before EXIT inside command substitution.
+  # These values must survive that unwind; the subshell keeps them private.
+  _SUB_LOCK="$CFG/sub-update.lock"; _SUB_RESULT=""
+  local acc url out why shown sub_err sel summary changed=0 retrying=0
   _sub_update_busy && { err "subscription update in progress"; exit 1; }
-  mkdir "$lock" 2>/dev/null || { err "subscription update in progress"; exit 1; }
-  trap 'if [ -n "$result" ]; then
-          printf "%s\n" "$result" > "$CFG/sub-update.result.tmp"
+  mkdir "$_SUB_LOCK" 2>/dev/null || { err "subscription update in progress"; exit 1; }
+  trap 'if [ -n "$_SUB_RESULT" ]; then
+          printf "%s\n" "$_SUB_RESULT" > "$CFG/sub-update.result.tmp"
           chmod 600 "$CFG/sub-update.result.tmp"
           mv "$CFG/sub-update.result.tmp" "$CFG/sub-update.result"
         fi
-        rm -f "$lock/pid" "$lock/acc" "$lock/acc.n" "$lock/error" "$lock/servers"
-        rmdir "$lock" 2>/dev/null || true' EXIT
-  printf '%s\n' "$$" > "$lock/pid"
+        rm -f "$_SUB_LOCK/pid" "$_SUB_LOCK/acc" "$_SUB_LOCK/acc.n" "$_SUB_LOCK/error" "$_SUB_LOCK/servers"
+        rmdir "$_SUB_LOCK" 2>/dev/null || true' EXIT
+  printf '%s\n' "$$" > "$_SUB_LOCK/pid"
   if [ "${1:-}" != watchdog ] && [ -d "$CFG/watch.lock" ]; then
     err "watchdog in progress; retry shortly"; exit 1
   fi
   [ "$(sub_count)" -gt 0 ] || { err "no saved subscriptions"; exit 1; }
   : > "$CFG/sub-update.at"; chmod 600 "$CFG/sub-update.at"
-  result="error: subscription update failed"
+  _SUB_RESULT="error: subscription update failed"
   info "re-fetching $(sub_count) subscription(s)…"
   _py_ok || _sub_update_fail "python3 not found"
-  acc="$lock/acc"; sub_err="$lock/error"
+  acc="$_SUB_LOCK/acc"; sub_err="$_SUB_LOCK/error"
   echo '[]' > "$acc"
   [ -s "$MANUAL" ] && jq -s 'add' "$acc" "$MANUAL" > "$acc.n" && mv "$acc.n" "$acc"
   while IFS= read -r url || [ -n "$url" ]; do
@@ -2238,10 +2242,11 @@ _sub_update() (
       _sub_update_fail "subscription fetch failed: $shown$why; previous servers kept"
     fi
   done < "$SUBS_FILE"
-  "${PY_VLESS[@]}" --combine < "$acc" > "$lock/servers" || _sub_update_fail "combine failed"
-  if [ "$(jq -cS . "$SERVERS" 2>/dev/null || echo '[]')" != "$(jq -cS . "$lock/servers")" ]; then changed=1; fi
-  if [ "$changed" = 0 ] && [ ! -f "$CFG/sub-update.pending" ]; then
-    result="subscriptions unchanged"; echo "$result"; exit 0
+  "${PY_VLESS[@]}" --combine < "$acc" > "$_SUB_LOCK/servers" || _sub_update_fail "combine failed"
+  if [ "$(jq -cS . "$SERVERS" 2>/dev/null || echo '[]')" != "$(jq -cS . "$_SUB_LOCK/servers")" ]; then changed=1; fi
+  [ -f "$CFG/sub-update.pending" ] && retrying=1
+  if [ "$changed" = 0 ] && [ "$retrying" = 0 ]; then
+    _SUB_RESULT="subscriptions unchanged"; echo "$_SUB_RESULT"; exit 0
   fi
   summary="subscriptions unchanged; pending update applied"
   if [ "$changed" = 1 ]; then
@@ -2254,19 +2259,22 @@ _sub_update() (
       ([$new | keys[] | select($old[.] != null and $old[.] != $new[.])] | length) as $changed |
       if $added + $removed + $changed == 0 then "subscriptions updated: server order changed"
       else "subscriptions updated: +\($added) added, -\($removed) removed, \($changed) changed" end
-      ' "$acc" "$lock/servers")" || _sub_update_fail "compare servers failed"
+      ' "$acc" "$_SUB_LOCK/servers")" || _sub_update_fail "compare servers failed"
   fi
   : > "$CFG/sub-update.pending"; chmod 600 "$CFG/sub-update.pending"
   if [ "$changed" = 1 ]; then
-    chmod 600 "$lock/servers"; mv "$lock/servers" "$SERVERS"
+    chmod 600 "$_SUB_LOCK/servers"; mv "$_SUB_LOCK/servers" "$SERVERS"
     sel="$(sget selected)"
     case "$sel" in auto|best) ;;
       *) jq -e --arg t "$sel" 'any(.tag==$t)' "$SERVERS" >/dev/null 2>&1 || sset selected "$(jq -r '.[0].tag // "auto"' "$SERVERS")" ;;
     esac
   fi
+  if [ "$retrying" = 1 ] && ! host_running; then
+    _sub_update_fail "subscriptions saved; pending update awaits a running router"
+  fi
   reload_if_running || _sub_update_fail "subscriptions saved but apply failed"
   rm -f "$CFG/sub-update.pending"
-  result="$summary"; echo "$result"
+  _SUB_RESULT="$summary"; echo "$_SUB_RESULT"
 )
 
 _watch_subscriptions() {

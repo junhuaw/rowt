@@ -7,10 +7,13 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tempfile
 import time
 import unittest
+
+from subscription_sandbox import Sandbox
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,105 @@ LINK = "vless://00000000-0000-4000-8000-000000000001@node.example:443#node\n"
 
 
 class SubscriptionTests(unittest.TestCase):
+    def test_watchdog_refreshes_once_then_obeys_persisted_schedule(self):
+        # Mode and interval boundaries are covered by the fast schedule tests.
+        for implementation, selected in (("bash", "auto"), ("rust", "best")):
+            with self.subTest(implementation=implementation, selected=selected):
+                with Sandbox(implementation) as box:
+                    box.set_state("selected", selected)
+                    box.http_feed()
+                    box.start_router()
+                    (box.cfg / "sub-update.at").unlink()
+                    box.run("watch", "tick")
+                    self.assertEqual(box.requests, 1)
+                    self.assertIn("unchanged", (box.cfg / "sub-update.result").read_text())
+                    stamp = (box.cfg / "sub-update.at").stat().st_mtime_ns
+                    box.run("watch", "tick")
+                    self.assertEqual(box.requests, 1)
+                    self.assertEqual((box.cfg / "sub-update.at").stat().st_mtime_ns, stamp)
+                    self.assertEqual(box.starts(), 0)
+                    self.assertFalse((box.cfg / "sub-update.lock").exists())
+                    self.assertFalse((box.cfg / "watch.lock").exists())
+
+    def test_running_router_reloads_only_for_changes_and_retries_failed_apply(self):
+        for implementation in ("bash", "rust"):
+            with self.subTest(implementation=implementation):
+                with Sandbox(implementation) as box:
+                    box.http_feed()
+                    initial = box.start_router()
+                    box.run("sub", "update")
+                    self.assertEqual(box.starts(), 0)
+                    self.assertIsNone(initial.poll())
+                    box.body = box.body.replace(":443", ":8443")
+                    box.run("sub", "update")
+                    self.assertEqual(box.starts(), 1)
+                    self.assertIsNotNone(initial.poll())
+                    pid = (box.cfg / "host.pid").read_text()
+                    box.run("sub", "update")
+                    self.assertEqual(box.starts(), 1)
+                    self.assertEqual((box.cfg / "host.pid").read_text(), pid)
+
+                    box.body = box.body.replace(":8443", ":9443")
+                    (box.root / "reject-config").touch()
+                    box.run("sub", "update", ok=False)
+                    self.assertTrue((box.cfg / "sub-update.pending").exists())
+                    self.assertEqual(box.starts(), 1, "failed validation must not stop the router")
+                    self.assertEqual((box.cfg / "host.pid").read_text(), pid)
+                    (box.root / "reject-config").unlink()
+                    # A saved update must remain pending while the router is down.
+                    box.run("router", "down")
+                    self.assertIn("pending", box.run("sub", "update", ok=False))
+                    self.assertTrue((box.cfg / "sub-update.pending").exists())
+                    self.assertEqual(box.starts(), 1)
+                    box.start_router()
+                    box.run("sub", "update")
+                    self.assertEqual(box.starts(), 2)
+                    self.assertFalse((box.cfg / "sub-update.pending").exists())
+                    self.assertEqual(box.pool()[0]["server_port"], 9443)
+
+    def test_manual_and_watchdog_refreshes_share_one_lock_across_processes(self):
+        for implementation, first in (("bash", ("watch", "tick")), ("rust", ("sub", "update"))):
+            with self.subTest(implementation=implementation, first=first):
+                with Sandbox(implementation) as box:
+                    box.http_feed()
+                    box.start_router()
+                    box.due()
+                    box.release.clear()
+                    process = box.start(*first)
+                    self.assertTrue(box.entered.wait(20), "first refresh never fetched the feed")
+                    stamp = (box.cfg / "sub-update.at").stat().st_mtime_ns
+                    other = "rust" if implementation == "bash" else "bash"
+                    self.assertIn("in progress", box.run("sub", "update", ok=False, implementation=other))
+                    # Even a stale watchdog lock must not be reclaimed
+                    # while a slow subscription refresh owns it.
+                    if first[0] == "watch":
+                        os.utime(box.cfg / "watch.lock", (1234, 1234))
+                    box.run("watch", "tick", implementation=other)
+                    self.assertEqual(box.requests, 1)
+                    self.assertEqual((box.cfg / "sub-update.at").stat().st_mtime_ns, stamp)
+                    box.release.set()
+                    box.finish(process)
+                    self.assertFalse((box.cfg / "sub-update.lock").exists())
+                    self.assertFalse((box.cfg / "watch.lock").exists())
+
+    def test_killed_refresh_can_be_recovered_by_either_cli(self):
+        for implementation in ("bash", "rust"):
+            with self.subTest(implementation=implementation):
+                with Sandbox(implementation) as box:
+                    box.http_feed()
+                    box.release.clear()
+                    process = box.start("sub", "update")
+                    self.assertTrue(box.entered.wait(10))
+                    old = box.pool()
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                    self.assertTrue((box.cfg / "sub-update.lock").exists())
+                    box.release.set()
+                    other = "rust" if implementation == "bash" else "bash"
+                    box.run("sub", "update", implementation=other)
+                    self.assertFalse((box.cfg / "sub-update.lock").exists())
+                    self.assertEqual(box.pool(), old)
+
     def test_bash_watchdog_schedule(self):
         source = (ROOT / "bin/rowt").read_text()
         function = re.search(r"^_watch_subscriptions\(\) \{.*?^\}", source, re.M | re.S).group()
@@ -75,7 +177,7 @@ class SubscriptionTests(unittest.TestCase):
         env = {
             "HOME": str(scratch),
             "XDG_CONFIG_HOME": str(scratch),
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+            "PATH": os.environ["PATH"],
             "ROWT_IMPL": implementation,
             "ROWT_PY": "1",
             "TERM": "dumb",

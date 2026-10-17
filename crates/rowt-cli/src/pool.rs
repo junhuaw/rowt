@@ -607,7 +607,10 @@ pub fn subscription_update_busy(cfg: &Path) -> bool {
             .and_then(|t| t.elapsed().ok()).is_some_and(|e| e.as_secs() > 60),
     };
     if stale {
-        let _ = std::fs::remove_file(path.join("pid"));
+        // Bash keeps its fetch/merge scratch files inside this shared lock.
+        for name in ["pid", "acc", "acc.n", "error", "servers"] {
+            let _ = std::fs::remove_file(path.join(name));
+        }
         let _ = std::fs::remove_dir(&path);
     }
     path.exists()
@@ -683,7 +686,8 @@ fn refresh_pool(ctx: &Ctx) -> Result<String, String> {
     let old: Vec<Value> = serde_json::from_str(&read(&path)).unwrap_or_default();
     let changed = old != batch.outbounds;
     let pending = ctx.cfg.join("sub-update.pending");
-    if !changed && !pending.exists() { return Ok("subscriptions unchanged".into()); }
+    let retrying = pending.exists();
+    if !changed && !retrying { return Ok("subscriptions unchanged".into()); }
     let message = if changed { refresh_summary(&old, &batch.outbounds) } else { "subscriptions unchanged; pending update applied".into() };
     // Retain a retry marker if applying fails after the pool has been saved.
     std::fs::write(&pending, "").map_err(|e| format!("write pending update: {e}"))?;
@@ -698,6 +702,9 @@ fn refresh_pool(ctx: &Ctx) -> Result<String, String> {
             let first = batch.outbounds.first().and_then(|o| o.get("tag")).and_then(Value::as_str).unwrap_or("auto");
             lifecycle::sset(ctx, "selected", first);
         }
+    }
+    if retrying && lifecycle::host_running(ctx).is_none() {
+        return Err("subscriptions saved; pending update awaits a running router".into());
     }
     lifecycle::reload_if_running(ctx).map_err(|e| format!("subscriptions saved but apply failed: {e}"))?;
     std::fs::remove_file(pending).map_err(|e| format!("clear pending update: {e}"))?;
